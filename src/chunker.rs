@@ -46,3 +46,50 @@ impl RabinKarpHash {
 		self.window_pos = 0;
 	}
 }
+
+const MIN_CHUNK_SIZE: usize = 1 << 9;
+const MAX_CHUNK_SIZE: usize = 1 << 12;
+const CHUNK_MASK: u32 = (1 << 10) - 1;
+
+pub struct Chunker<'a> {
+	rolling_hash: RabinKarpHash,
+	data: &'a [u8],
+}
+
+impl<'a> Chunker<'a> {
+	pub fn new(data: &'a [u8]) -> Self {
+		Self {
+			rolling_hash: RabinKarpHash::new(),
+			data,
+		}
+	}
+}
+
+impl<'a> Iterator for Chunker<'a> {
+	type Item = &'a [u8];
+	
+	fn next(&mut self) -> Option<Self::Item> {
+		if self.data.is_empty() {
+			return None;
+		}
+		
+		let mut chunk_size = MIN_CHUNK_SIZE.min(self.data.len());
+		
+		for &byte in &self.data[chunk_size..] {
+			let hash = self.rolling_hash.update(byte);
+			
+			chunk_size += 1;
+			
+			if (hash & CHUNK_MASK) == 0 || chunk_size >= MAX_CHUNK_SIZE {
+				break;
+			}
+		}
+		
+		let chunk = &self.data[..chunk_size];
+		
+		self.data = &self.data[chunk_size..];
+		self.rolling_hash.reset();
+		
+		Some(chunk)
+	}
+}

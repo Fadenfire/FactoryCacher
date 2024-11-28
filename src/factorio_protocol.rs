@@ -1,9 +1,12 @@
-#![allow(dead_code)]
-
-use std::io::Cursor;
-use bitflags::bitflags;
 use crate::io_utils::{BufExt, UnexpectedEOF};
+use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crc::Crc;
+use std::io::Cursor;
+
+pub const FACTORIO_CRC: Crc<u32> = Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
+
+pub const TRANSFER_BLOCK_SIZE: u32 = 503;
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub enum PacketType {
@@ -35,48 +38,55 @@ impl Into<u8> for PacketType {
 	}
 }
 
-pub struct FactorioPacket {
+pub struct FactorioPacketHeader {
 	pub packet_type: PacketType,
 	pub is_fragmented: bool,
 	pub is_last_fragment: bool,
-	pub data: Bytes,
 }
 
-impl FactorioPacket {
-	pub fn new(packet_type: PacketType, data: Bytes) -> Self {
+impl FactorioPacketHeader {
+	pub fn new_unfragmented(packet_type: PacketType) -> Self {
 		Self {
 			packet_type,
 			is_fragmented: false,
 			is_last_fragment: false,
-			data,
 		}
 	}
 	
-	pub fn encode(&self) -> Bytes {
-		let mut buf = BytesMut::new();
+	pub fn decode(mut data: Bytes) -> Result<(Self, Bytes), UnexpectedEOF> {
+		let flags = data.try_get_u8()?;
 		
+		let packet = Self {
+			packet_type: PacketType::from(flags & 0b00011111),
+			is_fragmented: (flags & 0b01000000) != 0,
+			is_last_fragment: (flags & 0b10000000) != 0,
+		};
+		
+		Ok((packet, data))
+	}
+	
+	pub fn encode(&self, buf: &mut BytesMut) {
 		let mut flags: u8 = self.packet_type.into();
 		if self.is_fragmented { flags |= 0b01000000; }
 		if self.is_last_fragment { flags |= 0b10000000; }
 		
 		buf.put_u8(flags);
-		buf.extend_from_slice(&self.data);
-		
-		buf.freeze()
 	}
 }
 
-pub fn parse_packet(mut data: Bytes) -> Result<FactorioPacket, UnexpectedEOF> {
-	let flags = data.try_get_u8()?;
+pub trait FactorioPacket {
+	const PACKET_TYPE: PacketType;
 	
-	let packet = FactorioPacket {
-		packet_type: PacketType::from(flags & 0b00011111),
-		is_fragmented: (flags & 0b01000000) != 0,
-		is_last_fragment: (flags & 0b10000000) != 0,
-		data
-	};
+	fn encode(&self, buf: &mut BytesMut);
 	
-	Ok(packet)
+	fn encode_full_packet(&self) -> Bytes {
+		let mut buf = BytesMut::new();
+		
+		FactorioPacketHeader::new_unfragmented(Self::PACKET_TYPE).encode(&mut buf);
+		self.encode(&mut buf);
+		
+		buf.freeze()
+	}
 }
 
 pub struct TransferBlockRequestPacket {
@@ -89,16 +99,13 @@ impl TransferBlockRequestPacket {
 			block_id: data.try_get_u32_le()?,
 		})
 	}
+}
+
+impl FactorioPacket for TransferBlockRequestPacket {
+	const PACKET_TYPE: PacketType = PacketType::TransferBlockRequest;
 	
-	pub fn encode(&self, buf: &mut BytesMut) {
+	fn encode(&self, buf: &mut BytesMut) {
 		buf.put_u32_le(self.block_id);
-	}
-	
-	pub fn as_factorio_packet(&self) -> FactorioPacket {
-		let mut buf = BytesMut::new();
-		self.encode(&mut buf);
-		
-		FactorioPacket::new(PacketType::TransferBlockRequest, buf.freeze())
 	}
 }
 
@@ -114,17 +121,14 @@ impl TransferBlockPacket {
 			data,
 		})
 	}
+}
+
+impl FactorioPacket for TransferBlockPacket {
+	const PACKET_TYPE: PacketType = PacketType::TransferBlock;
 	
-	pub fn encode(&self, buf: &mut BytesMut) {
+	fn encode(&self, buf: &mut BytesMut) {
 		buf.put_u32_le(self.block_id);
 		buf.extend_from_slice(&self.data);
-	}
-	
-	pub fn as_factorio_packet(&self) -> FactorioPacket {
-		let mut buf = BytesMut::new();
-		self.encode(&mut buf);
-		
-		FactorioPacket::new(PacketType::TransferBlock, buf.freeze())
 	}
 }
 
@@ -141,63 +145,56 @@ bitflags! {
 }
 
 pub struct ServerToClientHeartbeatPacket {
-	pub content: Bytes,
-	
 	pub flags: HeartbeatFlags,
 	pub seq_number: u32,
-	pub map_ready_to_download_data: Option<(MapReadyForDownloadData, usize)>,
+	pub data: Bytes,
 }
 
 impl ServerToClientHeartbeatPacket {
-	const MAP_READY_FOR_DOWNLOAD_ACTION_ID: u8 = 5;
+	pub const MAP_READY_FOR_DOWNLOAD_ACTION_ID: u8 = 5;
 	
-	pub fn decode(data: Bytes) -> Result<Self, UnexpectedEOF> {
-		let mut cursor = Cursor::new(&data);
-		
-		let flags = HeartbeatFlags::from_bits_retain(cursor.try_get_u8()?);
-		let seq_number = cursor.try_get_u32_le()?;
-		
-		let mut map_ready_to_download_data = None;
-		
-		if flags == HeartbeatFlags::HasSynchronizerActions {
-			let action_count = cursor.try_get_factorio_varint32()?;
-			
-			if action_count > 0 {
-				let action_type = cursor.try_get_u8()?;
-				
-				if action_type == Self::MAP_READY_FOR_DOWNLOAD_ACTION_ID {
-					let pos = cursor.position() as usize;
-					let action = MapReadyForDownloadData::decode(&mut cursor)?;
-					
-					map_ready_to_download_data = Some((action, pos));
-				}
-			}
-		}
+	pub fn decode(mut data: Bytes) -> Result<Self, UnexpectedEOF> {
+		let flags = HeartbeatFlags::from_bits_retain(data.try_get_u8()?);
+		let seq_number = data.try_get_u32_le()?;
 		
 		Ok(Self {
 			flags,
 			seq_number,
-			content: data,
-			
-			map_ready_to_download_data,
+			data,
 		})
 	}
 	
-	pub fn encode(&self, buf: &mut BytesMut) {
-		let initial_buf_size = buf.len();
-		buf.extend_from_slice(&self.content);
-		
-		if let Some((action, pos)) = self.map_ready_to_download_data.as_ref() {
-			action.encode(&mut buf[initial_buf_size + pos..]);
+	pub fn map_ready(mut self) -> Result<Option<MapReadyForDownloadData>, UnexpectedEOF> {
+		if self.flags == HeartbeatFlags::HasSynchronizerActions {
+			let action_count = self.data.try_get_factorio_varint32()?;
+			
+			if action_count > 0 {
+				let action_type = self.data.try_get_u8()?;
+				
+				if action_type == Self::MAP_READY_FOR_DOWNLOAD_ACTION_ID {
+					return Ok(Some(MapReadyForDownloadData::decode(&mut self.data)?));
+				}
+			}
 		}
+		
+		Ok(None)
 	}
 	
-	pub fn as_factorio_packet(&self) -> FactorioPacket {
-		let mut buf = BytesMut::new();
-		self.encode(&mut buf);
-		
-		FactorioPacket::new(PacketType::ServerToClientHeartbeat, buf.freeze())
-	}
+	// pub fn encode(&self, buf: &mut BytesMut) {
+	// 	let initial_buf_size = buf.len();
+	// 	buf.extend_from_slice(&self.content);
+	// 	
+	// 	if let Some((action, pos)) = self.map_ready_to_download_data.as_ref() {
+	// 		action.encode(&mut buf[initial_buf_size + pos..]);
+	// 	}
+	// }
+	// 
+	// pub fn as_factorio_packet(&self) -> FactorioPacket {
+	// 	let mut buf = BytesMut::new();
+	// 	self.encode(&mut buf);
+	// 	
+	// 	FactorioPacket::new(PacketType::ServerToClientHeartbeat, buf.freeze())
+	// }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
