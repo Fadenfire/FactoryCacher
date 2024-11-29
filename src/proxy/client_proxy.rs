@@ -223,7 +223,7 @@ async fn transfer_world_data(
 	let world_ready: WorldReadyMessage = protocol::recv_message(&mut recv_stream, &mut buf).await?;
 	let world_desc = world_ready.world;
 	
-	info!("Got world description: size: {}, crc: {}, file count: {}", world_desc.reconstructed_size, world_desc.reconstructed_crc, world_desc.files.len());
+	info!("Got world description: size: {}, crc: {}, file count: {}", world_desc.total_size, world_desc.reconstructed_crc, world_desc.files.len());
 	
 	let mut all_chunks = world_desc.files.iter()
 		.flat_map(|file| file.content_chunks.iter())

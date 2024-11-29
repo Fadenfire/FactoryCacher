@@ -1,72 +1,63 @@
-use std::borrow::Cow;
 use crate::chunker::Chunker;
-use crate::io_utils::BufExt;
+use crate::factorio_protocol::{FACTORIO_CRC, TRANSFER_BLOCK_SIZE};
+use crate::zip_writer::ZipWriter;
 use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use zip::ZipArchive;
-use crate::factorio_protocol::{FACTORIO_CRC, TRANSFER_BLOCK_SIZE};
-use crate::zip_writer::ZipWriter;
 
-pub const RECONSTRUCT_DEFLATE_LEVEL: u8 = 3;
+pub const RECONSTRUCT_DEFLATE_LEVEL: u8 = 0;
 
 #[derive(Deserialize, Serialize)]
 pub struct FactorioWorldDescription {
 	pub files: Vec<FactorioFileDescription>,
 	pub aux_data: Bytes,
-	pub reconstructed_size: u32,
+	pub world_size: u32,
+	pub world_block_length: u32,
+	pub aux_block_length: u32,
+	pub total_size: u32,
 	pub reconstructed_crc: u32,
 }
 
 #[derive(Deserialize, Serialize)]
 pub struct FactorioFileDescription {
-	pub file_type: FactorioFileDescriptionType,
+	pub file_type: FactorioFileType,
 	pub file_name: String,
 	pub content_size: u64,
 	pub content_chunks: Vec<ChunkKey>,
 }
 
-#[derive(Deserialize, Serialize)]
-pub enum FactorioFileDescriptionType {
+#[derive(Debug, Eq, PartialEq, Copy, Clone, Deserialize, Serialize)]
+pub enum FactorioFileType {
 	Normal,
-	LevelDat {
-		data_prefix: u16,
-	}
+	Zlib,
 }
 
-pub enum FactorioFile<'a> {
-	Normal(&'a [u8]),
-	LevelDat {
-		data_prefix: u16,
-		data: Cow<'a, [u8]>,
-	},
+pub struct FactorioFile<'a> {
+	pub file_type: FactorioFileType,
+	pub data: Cow<'a, [u8]>,
 }
 
-impl FactorioFile<'_> {
-	pub fn data(&self) -> &[u8] {
-		match self {
-			FactorioFile::Normal(data) => data,
-			FactorioFile::LevelDat { data, .. } => data,
-		}
-	}
-}
-
-pub fn deconstruct_world(world_data: &[u8], aux_data: &[u8]) -> anyhow::Result<(FactorioWorldDescription, HashMap<ChunkKey, Bytes>)> {
+pub fn deconstruct_world(world_data: &[u8], aux_data: &[u8]) -> anyhow::Result<(FactorioWorldDescription, HashMap<ChunkKey, Bytes>, Bytes)> {
 	let mut zip_reader = ZipArchive::new(Cursor::new(&world_data))?;
 	
 	let mut zip_writer = ZipWriter::new();
 	let mut crc_hasher = FACTORIO_CRC.digest();
-	let mut reconstructed_size: u32 = 0;
+	let mut world_size: u32 = 0;
 	
 	let mut chunks = HashMap::new();
 	let mut files = Vec::new();
 	
 	let mut buf = Vec::new();
 	
+	let mut final_data = BytesMut::new();
+	
 	let mut add_data = |data: &[u8]| {
 		crc_hasher.update(data);
-		reconstructed_size += data.len() as u32;
+		world_size += data.len() as u32;
+		final_data.put_slice(data);
 	};
 	
 	for i in 0..zip_reader.len() {
@@ -87,17 +78,25 @@ pub fn deconstruct_world(world_data: &[u8], aux_data: &[u8]) -> anyhow::Result<(
 	
 	add_data(&zip_writer.encode_central_directory());
 	
+	let world_block_length = (world_size + TRANSFER_BLOCK_SIZE - 1) / TRANSFER_BLOCK_SIZE;
+	let aux_block_length = (aux_data.len() as u32 + TRANSFER_BLOCK_SIZE - 1) / TRANSFER_BLOCK_SIZE;
+	
+	let total_size = (world_block_length + aux_block_length) * TRANSFER_BLOCK_SIZE;
+	
 	crc_hasher.update(aux_data);
 	let reconstructed_crc = crc_hasher.finalize();
 	
 	let world = FactorioWorldDescription {
 		files,
 		aux_data: aux_data.to_vec().into(),
-		reconstructed_size,
+		world_size,
+		world_block_length,
+		aux_block_length,
+		total_size,
 		reconstructed_crc,
 	};
 	
-	Ok((world, chunks))
+	Ok((world, chunks, final_data.freeze()))
 }
 
 pub struct WorldReconstructor {
@@ -131,12 +130,9 @@ impl WorldReconstructor {
 			}
 		}
 		
-		let file = match file_desc.file_type {
-			FactorioFileDescriptionType::Normal => FactorioFile::Normal(&buf),
-			FactorioFileDescriptionType::LevelDat { data_prefix } => FactorioFile::LevelDat {
-				data_prefix,
-				data: Cow::Borrowed(&buf),
-			}
+		let file = FactorioFile {
+			file_type: file_desc.file_type,
+			data: Cow::Borrowed(&buf),
 		};
 		
 		let file_data = encode_factorio_file(&file);
@@ -154,16 +150,13 @@ impl WorldReconstructor {
 		let old_size = self.current_size;
 		self.current_size += buf.len();
 		
-		if self.current_size != world_desc.reconstructed_size as usize {
-			return Err(anyhow::anyhow!("Client reconstructed size doesn't match server client: {}, server: {}",
-				buf.len(), world_desc.reconstructed_size));
+		if self.current_size != world_desc.world_size as usize {
+			return Err(anyhow::anyhow!("Client world size doesn't match server client: {}, server: {}",
+				self.current_size, world_desc.world_size));
 		}
 		
-		let world_block_length = (world_desc.reconstructed_size + TRANSFER_BLOCK_SIZE - 1) / TRANSFER_BLOCK_SIZE;
-		let aux_block_length = (world_desc.aux_data.len() as u32 + TRANSFER_BLOCK_SIZE - 1) / TRANSFER_BLOCK_SIZE;
-		
-		let world_aligned_length = (world_block_length * TRANSFER_BLOCK_SIZE) as usize;
-		let aux_aligned_length = (aux_block_length * TRANSFER_BLOCK_SIZE) as usize;
+		let world_aligned_length = (world_desc.world_block_length * TRANSFER_BLOCK_SIZE) as usize;
+		let aux_aligned_length = (world_desc.aux_block_length * TRANSFER_BLOCK_SIZE) as usize;
 		
 		buf.resize(world_aligned_length - self.current_size + buf.len(), 0);
 		
@@ -176,44 +169,37 @@ impl WorldReconstructor {
 	}
 }
 
-pub fn decode_factorio_file<'a>(file_name: &str, mut file_data: &'a [u8]) -> anyhow::Result<FactorioFile<'a>> {
+pub fn decode_factorio_file<'a>(file_name: &str, file_data: &'a [u8]) -> anyhow::Result<FactorioFile<'a>> {
 	let name = file_name.rsplit_once('/').map(|(_, last)| last).unwrap_or(file_name);
 	
 	if name.strip_prefix("level.dat").is_some_and(|suffix| suffix.chars().all(|c| c.is_ascii_digit())) {
-		let data_prefix = file_data.try_get_u16_le()?;
-		let uncompressed_data = miniz_oxide::inflate::decompress_to_vec_with_limit(file_data, 20_000_000)?;
+		let uncompressed_data = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(file_data, 20_000_000)?;
 		
-		Ok(FactorioFile::LevelDat {
-			data_prefix,
+		Ok(FactorioFile {
+			file_type: FactorioFileType::Zlib,
 			data: uncompressed_data.into(),
 		})
 	} else {
-		Ok(FactorioFile::Normal(file_data))
+		Ok(FactorioFile {
+			file_type: FactorioFileType::Normal,
+			data: file_data.into(),
+		})
 	}
 }
 
 pub fn encode_factorio_file<'a>(file: &'a FactorioFile<'a>) -> Cow<[u8]> {
-	match file {
-		FactorioFile::Normal(data) => Cow::Borrowed(data),
-		FactorioFile::LevelDat { data_prefix, data } => {
-			let mut buf = data_prefix.to_le_bytes().to_vec();
-			buf.extend_from_slice(&miniz_oxide::deflate::compress_to_vec(data, RECONSTRUCT_DEFLATE_LEVEL));
+	match file.file_type {
+		FactorioFileType::Normal => Cow::Borrowed(&file.data),
+		FactorioFileType::Zlib => {
+			let data = miniz_oxide::deflate::compress_to_vec_zlib(&file.data, RECONSTRUCT_DEFLATE_LEVEL);
 			
-			Cow::Owned(buf)
+			Cow::Owned(data)
 		},
 	}
 }
 
 pub fn chunk_file(file_name: &str, file: &FactorioFile, chunks: &mut HashMap<ChunkKey, Bytes>) -> anyhow::Result<FactorioFileDescription> {
-	let file_data = file.data();
-	let chunker = Chunker::new(file_data);
-	
-	let file_type = match &file {
-		FactorioFile::Normal(_) => FactorioFileDescriptionType::Normal,
-		FactorioFile::LevelDat { data_prefix, .. } => FactorioFileDescriptionType::LevelDat {
-			data_prefix: *data_prefix,
-		},
-	};
+	let chunker = Chunker::new(&file.data);
 	
 	let mut content_chunks = Vec::new();
 	
@@ -225,20 +211,12 @@ pub fn chunk_file(file_name: &str, file: &FactorioFile, chunks: &mut HashMap<Chu
 	}
 	
 	Ok(FactorioFileDescription {
-		file_type,
+		file_type: file.file_type,
 		file_name: file_name.to_owned(),
-		content_size: file_data.len() as u64,
+		content_size: file.data.len() as u64,
 		content_chunks,
 	})
 }
-
-// pub fn reconstruct_file(file: &FactorioFileEntry, chunks: &HashMap<ChunkKey, Bytes>) -> anyhow::Result<Bytes> {
-// 	let mut buf = BytesMut::new();
-// 	
-// 	
-// 	
-// 	Ok(buf.freeze())
-// }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct ChunkKey(pub blake3::Hash);

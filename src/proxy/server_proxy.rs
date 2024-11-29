@@ -272,7 +272,7 @@ impl ServerProxyState {
 		let world_data = &received_data[..state.world_info.world_size as usize];
 		let aux_data = &received_data[aux_data_offset as usize..(aux_data_offset + state.world_info.aux_size) as usize];
 		
-		let (world_description, chunks) =
+		let (world_description, chunks, new_world_data) =
 			match dedup::deconstruct_world(world_data, aux_data) {
 				Ok(result) => result,
 				Err(err) => {
@@ -284,7 +284,7 @@ impl ServerProxyState {
 			};
 		
 		let new_world_info = MapReadyForDownloadData {
-			world_size: world_description.reconstructed_size,
+			world_size: world_description.world_size,
 			world_crc: world_description.reconstructed_crc,
 			..state.world_info
 		};
