@@ -1,12 +1,11 @@
 use crate::dedup::{ChunkKey, FactorioWorldDescription};
 use crate::factorio_protocol::{FactorioPacket, FactorioPacketHeader, MapReadyForDownloadData, PacketType, ServerToClientHeartbeatPacket, TransferBlockPacket, TransferBlockRequestPacket, TRANSFER_BLOCK_SIZE};
-use crate::protocol::{Datagram, RequestChunksMessage, SendChunksMessage, WorldReadyMessage};
-use crate::proxy::PacketDirection;
-use crate::{dedup, protocol};
+use crate::protocol::{Datagram, RequestChunksMessage, SendChunksMessage, WorldReadyMessage, UDP_PEER_IDLE_TIMEOUT};
+use crate::proxy::{PacketDirection, UDP_QUEUE_SIZE};
+use crate::{dedup, protocol, utils};
 use bytes::{Bytes, BytesMut};
 use log::{error, info};
 use quinn_proto::VarInt;
-use socket2::SockRef;
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -43,9 +42,8 @@ pub async fn run_server_proxy(
                 };
 
                 let socket = UdpSocket::bind((localhost, 0)).await?;
-				SockRef::from(&socket).set_recv_buffer_size(16 * 1024 * 1024)?;
 				
-                let (receive_queue_tx, receive_queue_rx) = mpsc::channel(8192);
+                let (receive_queue_tx, receive_queue_rx) = mpsc::channel(UDP_QUEUE_SIZE);
 
                 tokio::spawn(proxy_server(ProxyServerArgs {
                     connection: connection.clone(),
@@ -95,14 +93,13 @@ async fn proxy_server(mut args: ProxyServerArgs) {
                 if remote_addr != args.factorio_addr { continue; }
 
                 proxy_state.on_packet_from_server(buf.split().freeze(), &mut out_packets);
-				// out_packets.push((buf.split().freeze(), PacketDirection::ToClient));
             }
             result = args.receive_queue_rx.recv() => {
                 let Some(packet_data) = result else { return; };
 
                 out_packets.push((packet_data, PacketDirection::ToServer));
             }
-            // _ = tokio::time::sleep(UDP_PEER_IDLE_TIMEOUT) => return
+            _ = tokio::time::sleep(UDP_PEER_IDLE_TIMEOUT) => return
         }
 		
 		for (packet_data, dir) in out_packets.drain(..) {
@@ -322,25 +319,45 @@ async fn transfer_world_data(
 ) -> anyhow::Result<()> {
 	info!("Transferring world data");
 	
-	protocol::send_message(&mut send_stream, WorldReadyMessage {
+	let original_world_size = world_description.original_world_size as u64;
+	let mut total_transferred = 0;
+	
+	let world_ready_message = protocol::encode_message_async(WorldReadyMessage {
 		world: world_description,
 	}).await?;
 	
-	let mut buffer = BytesMut::new();
+	total_transferred += world_ready_message.len() as u64;
+	info!("Sending world description, size: {}B", utils::abbreviate_number(world_ready_message.len() as u64));
 	
-	while let Ok(request) =
-		protocol::recv_message::<RequestChunksMessage>(&mut recv_stream, &mut buffer).await
-	{
+	protocol::write_message(&mut send_stream, world_ready_message).await?;
+	
+	let mut buf = BytesMut::new();
+	
+	while let Ok(request_data) = protocol::read_message(&mut recv_stream, &mut buf).await {
+		let request: RequestChunksMessage = protocol::decode_message_async(request_data).await?;
+		
 		let response = SendChunksMessage {
 			chunks: request.requested_chunks.iter()
-				.map(|&key| chunks[&key].clone())
+				.map(|&key| chunks.get(&key).expect("Client requested chunk that we don't have").clone())
 				.collect()
 		};
 		
-		info!("Send chunk batch");
+		let response_data = protocol::encode_message_async(response).await?;
+		total_transferred += response_data.len() as u64;
 		
-		protocol::send_message(&mut send_stream, response).await?;
+		info!("Sending batch of {} chunks, size: {}B",
+			request.requested_chunks.len(),
+			utils::abbreviate_number(response_data.len() as u64)
+		);
+		
+		protocol::write_message(&mut send_stream, response_data).await?;
 	}
+	
+	info!("Finished sending world, total transferred: {}B, original size: {}B, dedup ratio: {:.2}%",
+		utils::abbreviate_number(total_transferred),
+		utils::abbreviate_number(original_world_size),
+		(total_transferred as f64 / original_world_size as f64) * 100.0,
+	);
 	
 	Ok(())
 }

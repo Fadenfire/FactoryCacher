@@ -44,7 +44,7 @@ impl RabinKarpHash {
 
 const MIN_CHUNK_SIZE: usize = 1 << 9;
 const MAX_CHUNK_SIZE: usize = 1 << 12;
-const CHUNK_MASK: u32 = (1 << 10) - 1;
+const CHUNK_MASK: u32 = (1 << 11) - 1;
 
 pub struct Chunker<'a> {
 	rolling_hash: RabinKarpHash,

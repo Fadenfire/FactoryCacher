@@ -1,4 +1,4 @@
-use crate::io_utils::{BufExt, UnexpectedEOF};
+use crate::utils::{BufExt, UnexpectedEOF};
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crc::Crc;

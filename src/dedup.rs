@@ -8,13 +8,15 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use zip::ZipArchive;
 
-pub const RECONSTRUCT_DEFLATE_LEVEL: u8 = 0;
+pub const RECONSTRUCT_DEFLATE_LEVEL: u8 = 1;
 
 #[derive(Deserialize, Serialize)]
 pub struct FactorioWorldDescription {
 	pub files: Vec<FactorioFileDescription>,
 	pub aux_data: Bytes,
 	pub world_size: u32,
+	
+	pub original_world_size: u32,
 	pub world_block_length: u32,
 	pub aux_block_length: u32,
 	pub total_size: u32,
@@ -90,6 +92,8 @@ pub fn deconstruct_world(
 		files,
 		aux_data: aux_data.to_vec().into(),
 		world_size,
+		
+		original_world_size: world_data.len() as u32,
 		world_block_length,
 		aux_block_length,
 		total_size,

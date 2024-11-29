@@ -3,7 +3,6 @@ use anyhow::Context;
 use argh::FromArgs;
 use log::{error, info};
 use quinn::Endpoint;
-use socket2::SockRef;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use time::util::local_offset::Soundness;
@@ -13,7 +12,7 @@ use crate::chunk_cache::ChunkCache;
 
 mod chunker;
 mod factorio_protocol;
-mod io_utils;
+mod utils;
 mod proxy;
 mod quic;
 mod protocol;
@@ -73,7 +72,6 @@ struct ServerArgs {
 async fn main() {
     let args: Args = argh::from_env();
 	
-	unsafe { time::util::local_offset::set_soundness(Soundness::Unsound); }
 	setup_logging();
 	
 	match args.subcommand {
@@ -116,8 +114,6 @@ async fn run_client(endpoint: &Endpoint, server_address: SocketAddr, args: &Clie
 	
 	let listen_address = SocketAddr::new(args.host, args.port);
 	let socket = Arc::new(UdpSocket::bind(listen_address).await?);
-	
-	SockRef::from(&socket).set_recv_buffer_size(16 * 1024 * 1024)?;
 	
 	info!("Connected");
 	
@@ -168,6 +164,8 @@ async fn run_server(endpoint: &Endpoint, factorio_address: SocketAddr) -> anyhow
 
 fn setup_logging() {
 	use simplelog::*;
+	
+	unsafe { time::util::local_offset::set_soundness(Soundness::Unsound); }
 	
 	let config = ConfigBuilder::new()
 		.set_time_format_custom(format_description!("[[[hour repr:12]:[minute]:[second] [period]]"))

@@ -1,3 +1,4 @@
+use std::time::Duration;
 use crate::dedup::{ChunkKey, FactorioWorldDescription};
 use bytes::{BufMut, Bytes, BytesMut};
 use quinn_proto::coding::Codec;
@@ -5,6 +6,8 @@ use quinn_proto::VarInt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+pub const UDP_PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Datagram {
@@ -48,10 +51,18 @@ pub fn encode_message<T: Serialize>(message: &T) -> anyhow::Result<Bytes> {
 	Ok(data.into())
 }
 
+pub async fn encode_message_async<T: Serialize + Send + 'static>(message: T) -> anyhow::Result<Bytes> {
+	tokio::task::spawn_blocking(move || encode_message(&message)).await?
+}
+
 pub fn decode_message<T: DeserializeOwned>(msg_data: &[u8]) -> anyhow::Result<T> {
 	let decoder = zstd::Decoder::new(msg_data)?;
 	
 	Ok(rmp_serde::decode::from_read(decoder)?)
+}
+
+pub async fn decode_message_async<T: DeserializeOwned + Send + 'static>(msg_data: Bytes) -> anyhow::Result<T> {
+	tokio::task::spawn_blocking(move || decode_message::<T>(&msg_data)).await?
 }
 
 pub async fn write_message<W: AsyncWrite + Unpin>(io: &mut W, msg_data: Bytes) -> anyhow::Result<()> {
@@ -78,23 +89,23 @@ pub async fn read_message<R: AsyncRead + Unpin>(io: &mut R, buffer: &mut BytesMu
 	Ok(buffer.split().freeze())
 }
 
-pub async fn send_message<T>(io: &mut (impl AsyncWrite + Unpin), message: T) -> anyhow::Result<()>
-where
-	T: Serialize + Send + 'static,
-{
-	let msg_data = tokio::task::spawn_blocking(move || encode_message(&message)).await??;
-	
-	write_message(io, msg_data).await
-}
-
-pub async fn recv_message<T>(io: &mut (impl AsyncRead + Unpin), buffer: &mut BytesMut) -> anyhow::Result<T>
-where
-	T: DeserializeOwned + Send + 'static,
-{
-	let msg_data = read_message(io, buffer).await?;
-	
-	tokio::task::spawn_blocking(move || decode_message::<T>(&msg_data)).await?
-}
+// pub async fn send_message<T>(io: &mut (impl AsyncWrite + Unpin), message: T) -> anyhow::Result<()>
+// where
+// 	T: Serialize + Send + 'static,
+// {
+// 	let msg_data = tokio::task::spawn_blocking(move || encode_message(&message)).await??;
+// 	
+// 	write_message(io, msg_data).await
+// }
+// 
+// pub async fn recv_message<T>(io: &mut (impl AsyncRead + Unpin), buffer: &mut BytesMut) -> anyhow::Result<T>
+// where
+// 	T: DeserializeOwned + Send + 'static,
+// {
+// 	let msg_data = read_message(io, buffer).await?;
+// 	
+// 	tokio::task::spawn_blocking(move || decode_message::<T>(&msg_data)).await?
+// }
 
 #[derive(Deserialize, Serialize)]
 pub struct WorldReadyMessage {
