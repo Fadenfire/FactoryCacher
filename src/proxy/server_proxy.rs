@@ -10,6 +10,7 @@ use socket2::SockRef;
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
 use tokio::select;
@@ -138,7 +139,6 @@ struct DownloadingWorldState {
 	held_packets: Vec<Bytes>,
 	world_info: MapReadyForDownloadData,
 	world_block_count: u32,
-	aux_block_count: u32,
 	received_blocks: Vec<TransferBlockPacket>,
 	block_request_queue: BTreeSet<u32>,
 	last_block_time: Instant,
@@ -164,7 +164,7 @@ impl ServerProxyState {
 				{
 					if header.packet_type == PacketType::ServerToClientHeartbeat {
 						let result = ServerToClientHeartbeatPacket::decode(msg_data)
-							.and_then(ServerToClientHeartbeatPacket::map_ready);
+							.and_then(ServerToClientHeartbeatPacket::try_decode_map_ready);
 						
 						if let Ok(Some(world_info)) = result {
 							self.transition_to_downloading_world(in_packet_data, world_info, out_packets);
@@ -196,25 +196,19 @@ impl ServerProxyState {
 							
 							out_packets.push((request.encode_full_packet(), PacketDirection::ToServer));
 						}
-						
-						return;
-					} else if header.packet_type == PacketType::ServerToClientHeartbeat {
-						if in_packet_data.windows(4).any(|w| w == state.world_info.world_size.to_le_bytes())
-						{
-							state.held_packets.push(in_packet_data);
-							return;
-						}
+					} else {
+						state.held_packets.push(in_packet_data);
 					}
 				}
 				
-				// if (Instant::now() - state.last_block_time) > Duration::from_millis(100) {
-				// 	let next_block_id = *state.block_request_queue.first().unwrap();
-				// 	let request = TransferBlockRequestPacket { block_id: next_block_id };
-				// 	
-				// 	out_packets.push((request.encode_full_packet(), PacketDirection::ToServer));
-				// }
-				// 
-				// return;
+				if (Instant::now() - state.last_block_time) > Duration::from_millis(100) {
+					let next_block_id = *state.block_request_queue.first().unwrap();
+					let request = TransferBlockRequestPacket { block_id: next_block_id };
+					
+					out_packets.push((request.encode_full_packet(), PacketDirection::ToServer));
+				}
+				
+				return;
 			}
 			ServerProxyPhase::Done => {}
 		}
@@ -239,7 +233,6 @@ impl ServerProxyState {
 			held_packets: vec![in_packet_data],
 			world_info,
 			world_block_count,
-			aux_block_count,
 			received_blocks: Vec::new(),
 			block_request_queue: BTreeSet::from_iter(0..total_block_count),
 			last_block_time: Instant::now(),
@@ -272,7 +265,7 @@ impl ServerProxyState {
 		let world_data = &received_data[..state.world_info.world_size as usize];
 		let aux_data = &received_data[aux_data_offset as usize..(aux_data_offset + state.world_info.aux_size) as usize];
 		
-		let (world_description, chunks, new_world_data) =
+		let (world_description, chunks) =
 			match dedup::deconstruct_world(world_data, aux_data) {
 				Ok(result) => result,
 				Err(err) => {

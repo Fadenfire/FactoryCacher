@@ -40,7 +40,10 @@ pub struct FactorioFile<'a> {
 	pub data: Cow<'a, [u8]>,
 }
 
-pub fn deconstruct_world(world_data: &[u8], aux_data: &[u8]) -> anyhow::Result<(FactorioWorldDescription, HashMap<ChunkKey, Bytes>, Bytes)> {
+pub fn deconstruct_world(
+	world_data: &[u8],
+	aux_data: &[u8]
+) -> anyhow::Result<(FactorioWorldDescription, HashMap<ChunkKey, Bytes>)> {
 	let mut zip_reader = ZipArchive::new(Cursor::new(&world_data))?;
 	
 	let mut zip_writer = ZipWriter::new();
@@ -52,12 +55,9 @@ pub fn deconstruct_world(world_data: &[u8], aux_data: &[u8]) -> anyhow::Result<(
 	
 	let mut buf = Vec::new();
 	
-	let mut final_data = BytesMut::new();
-	
 	let mut add_data = |data: &[u8]| {
 		crc_hasher.update(data);
 		world_size += data.len() as u32;
-		final_data.put_slice(data);
 	};
 	
 	for i in 0..zip_reader.len() {
@@ -96,7 +96,7 @@ pub fn deconstruct_world(world_data: &[u8], aux_data: &[u8]) -> anyhow::Result<(
 		reconstructed_crc,
 	};
 	
-	Ok((world, chunks, final_data.freeze()))
+	Ok((world, chunks))
 }
 
 pub struct WorldReconstructor {

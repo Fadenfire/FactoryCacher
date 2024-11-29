@@ -1,11 +1,10 @@
-use std::collections::HashMap;
+use crate::dedup::{ChunkKey, FactorioWorldDescription};
 use bytes::{BufMut, Bytes, BytesMut};
 use quinn_proto::coding::Codec;
 use quinn_proto::VarInt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use crate::dedup::{ChunkKey, FactorioWorldDescription};
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Datagram {

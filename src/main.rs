@@ -12,7 +12,6 @@ use tokio::select;
 use crate::chunk_cache::ChunkCache;
 
 mod chunker;
-mod dedup_testing;
 mod factorio_protocol;
 mod io_utils;
 mod proxy;

@@ -2,7 +2,7 @@ use crate::dedup::ChunkKey;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Semaphore;
 
 pub struct ChunkCache {
 	inner: Mutex<ChunkCacheInner>,
@@ -136,18 +136,13 @@ impl ChunkCache {
 		None
 	}
 	
-	pub fn insert(&self, key: ChunkKey, chunk: Bytes) {
-		let mut inner = self.inner.lock().unwrap();
-		
-		inner.chunks.insert(key, chunk);
-		inner.pending_chunks.remove(&key);
-	}
+	// pub fn insert(&self, key: ChunkKey, chunk: Bytes) {
+	// 	let mut inner = self.inner.lock().unwrap();
+	// 	
+	// 	inner.chunks.insert(key, chunk);
+	// 	inner.pending_chunks.remove(&key);
+	// }
 }
-
-// pub enum ChunkCacheResult<'a> {
-// 	Present(Bytes),
-// 	Absent(ChunkHandle<'a>),
-// }
 
 pub struct BatchChunkRequest<'a> {
 	event: Arc<Semaphore>,

@@ -2,7 +2,6 @@ use crate::io_utils::{BufExt, UnexpectedEOF};
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crc::Crc;
-use std::io::Cursor;
 
 pub const FACTORIO_CRC: Crc<u32> = Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
 
@@ -146,7 +145,6 @@ bitflags! {
 
 pub struct ServerToClientHeartbeatPacket {
 	pub flags: HeartbeatFlags,
-	pub seq_number: u32,
 	pub data: Bytes,
 }
 
@@ -155,16 +153,15 @@ impl ServerToClientHeartbeatPacket {
 	
 	pub fn decode(mut data: Bytes) -> Result<Self, UnexpectedEOF> {
 		let flags = HeartbeatFlags::from_bits_retain(data.try_get_u8()?);
-		let seq_number = data.try_get_u32_le()?;
+		data.try_get_u32_le()?; // Seq number
 		
 		Ok(Self {
 			flags,
-			seq_number,
 			data,
 		})
 	}
 	
-	pub fn map_ready(mut self) -> Result<Option<MapReadyForDownloadData>, UnexpectedEOF> {
+	pub fn try_decode_map_ready(mut self) -> Result<Option<MapReadyForDownloadData>, UnexpectedEOF> {
 		if self.flags == HeartbeatFlags::HasSynchronizerActions {
 			let action_count = self.data.try_get_factorio_varint32()?;
 			
@@ -179,22 +176,6 @@ impl ServerToClientHeartbeatPacket {
 		
 		Ok(None)
 	}
-	
-	// pub fn encode(&self, buf: &mut BytesMut) {
-	// 	let initial_buf_size = buf.len();
-	// 	buf.extend_from_slice(&self.content);
-	// 	
-	// 	if let Some((action, pos)) = self.map_ready_to_download_data.as_ref() {
-	// 		action.encode(&mut buf[initial_buf_size + pos..]);
-	// 	}
-	// }
-	// 
-	// pub fn as_factorio_packet(&self) -> FactorioPacket {
-	// 	let mut buf = BytesMut::new();
-	// 	self.encode(&mut buf);
-	// 	
-	// 	FactorioPacket::new(PacketType::ServerToClientHeartbeat, buf.freeze())
-	// }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]

@@ -35,11 +35,6 @@ impl RabinKarpHash {
 		}
 	}
 	
-	#[inline]
-	pub fn digest(&self) -> u32 {
-		self.hash
-	}
-	
 	pub fn reset(&mut self) {
 		self.hash = 0;
 		self.window.fill(0);
