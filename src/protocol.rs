@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use bytes::{BufMut, Bytes, BytesMut};
 use quinn_proto::coding::Codec;
 use quinn_proto::VarInt;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use crate::dedup::{ChunkKey, FactorioWorldDescription};
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Datagram {
@@ -75,4 +77,37 @@ pub async fn read_message<R: AsyncRead + Unpin>(io: &mut R, buffer: &mut BytesMu
 	io.read_exact(buffer).await?;
 	
 	Ok(buffer.split().freeze())
+}
+
+pub async fn send_message<T>(io: &mut (impl AsyncWrite + Unpin), message: T) -> anyhow::Result<()>
+where
+	T: Serialize + Send + 'static,
+{
+	let msg_data = tokio::task::spawn_blocking(move || encode_message(&message)).await??;
+	
+	write_message(io, msg_data).await
+}
+
+pub async fn recv_message<T>(io: &mut (impl AsyncRead + Unpin), buffer: &mut BytesMut) -> anyhow::Result<T>
+where
+	T: DeserializeOwned + Send + 'static,
+{
+	let msg_data = read_message(io, buffer).await?;
+	
+	tokio::task::spawn_blocking(move || decode_message::<T>(&msg_data)).await?
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct WorldReadyMessage {
+	pub world: FactorioWorldDescription,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct RequestChunksMessage {
+	pub requested_chunks: Vec<ChunkKey>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct SendChunksMessage {
+	pub chunks: Vec<Bytes>,
 }

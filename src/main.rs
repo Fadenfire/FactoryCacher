@@ -1,28 +1,26 @@
-use std::fs::File;
-use std::io::Write;
-use std::path::Component;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use crate::proxy::{client_proxy, server_proxy};
 use anyhow::Context;
 use argh::FromArgs;
 use log::{error, info};
 use quinn::Endpoint;
 use socket2::SockRef;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use time::util::local_offset::Soundness;
 use tokio::net::{lookup_host, UdpSocket};
 use tokio::select;
-use crate::proxy::{client_proxy, server_proxy};
-use crate::zip_writer::ZipWriter;
+use crate::chunk_cache::ChunkCache;
 
 mod chunker;
 mod dedup_testing;
-mod proxy_testing;
 mod factorio_protocol;
 mod io_utils;
 mod proxy;
 mod quic;
 mod protocol;
 mod zip_writer;
+mod dedup;
+mod chunk_cache;
 
 #[derive(FromArgs)]
 /// Factorio cacher
@@ -124,7 +122,9 @@ async fn run_client(endpoint: &Endpoint, server_address: SocketAddr, args: &Clie
 	
 	info!("Connected");
 	
-	client_proxy::run_client_proxy(socket.clone(), quic_connection.clone()).await?;
+	let chunk_cache = Arc::new(ChunkCache::new());
+	
+	client_proxy::run_client_proxy(socket.clone(), quic_connection.clone(), chunk_cache.clone()).await?;
 	
 	Ok(())
 }

@@ -1,6 +1,8 @@
 use bytes::Buf;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
+#[error("unexpected end of file")]
 pub struct UnexpectedEOF;
 
 pub trait BufExt {

@@ -1,14 +1,15 @@
-use crate::factorio_protocol::{FactorioPacket, FactorioPacketHeader, HeartbeatFlags, MapReadyForDownloadData, PacketType, ServerToClientHeartbeatPacket, TransferBlockPacket, TransferBlockRequestPacket, TRANSFER_BLOCK_SIZE};
-use crate::protocol::Datagram;
-use crate::proxy::{PacketAction, PacketDirection};
+use crate::dedup::{ChunkKey, FactorioWorldDescription};
+use crate::factorio_protocol::{FactorioPacket, FactorioPacketHeader, MapReadyForDownloadData, PacketType, ServerToClientHeartbeatPacket, TransferBlockPacket, TransferBlockRequestPacket, TRANSFER_BLOCK_SIZE};
+use crate::protocol::{Datagram, RequestChunksMessage, SendChunksMessage, WorldReadyMessage};
+use crate::proxy::PacketDirection;
+use crate::{dedup, protocol};
 use bytes::{Bytes, BytesMut};
-use log::info;
+use log::{error, info};
 use quinn_proto::VarInt;
+use socket2::SockRef;
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
-use socket2::SockRef;
 use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
 use tokio::select;
@@ -136,6 +137,8 @@ enum ServerProxyPhase {
 struct DownloadingWorldState {
 	held_packets: Vec<Bytes>,
 	world_info: MapReadyForDownloadData,
+	world_block_count: u32,
+	aux_block_count: u32,
 	received_blocks: Vec<TransferBlockPacket>,
 	block_request_queue: BTreeSet<u32>,
 	last_block_time: Instant,
@@ -176,7 +179,7 @@ impl ServerProxyState {
 				{
 					if header.packet_type == PacketType::TransferBlock {
 						let Ok(transfer_block) = TransferBlockPacket::decode(msg_data)
-							else { return; };
+						else { return; };
 						
 						if state.block_request_queue.remove(&transfer_block.block_id) {
 							state.received_blocks.push(transfer_block);
@@ -201,7 +204,6 @@ impl ServerProxyState {
 							state.held_packets.push(in_packet_data);
 							return;
 						}
-						
 					}
 				}
 				
@@ -235,7 +237,9 @@ impl ServerProxyState {
 		
 		let state = DownloadingWorldState {
 			held_packets: vec![in_packet_data],
-			world_info: world_info.clone(),
+			world_info,
+			world_block_count,
+			aux_block_count,
 			received_blocks: Vec::new(),
 			block_request_queue: BTreeSet::from_iter(0..total_block_count),
 			last_block_time: Instant::now(),
@@ -257,45 +261,58 @@ impl ServerProxyState {
 		
 		state.received_blocks.sort_by_key(|block| block.block_id);
 		
-		let mut world_data = Vec::new();
+		let mut received_data = Vec::new();
 		
 		for block in state.received_blocks.drain(..) {
-			world_data.extend_from_slice(&block.data);
+			received_data.extend_from_slice(&block.data);
 		}
+		
+		let aux_data_offset = state.world_block_count * TRANSFER_BLOCK_SIZE;
+		
+		let world_data = &received_data[..state.world_info.world_size as usize];
+		let aux_data = &received_data[aux_data_offset as usize..(aux_data_offset + state.world_info.aux_size) as usize];
+		
+		let (world_description, chunks) =
+			match dedup::deconstruct_world(world_data, aux_data) {
+				Ok(result) => result,
+				Err(err) => {
+					error!("Error trying to deconstruct world: {:?}", err);
+					
+					self.phase = ServerProxyPhase::Done;
+					return;
+				}
+			};
+		
+		let new_world_info = MapReadyForDownloadData {
+			world_size: world_description.reconstructed_size,
+			world_crc: world_description.reconstructed_crc,
+			..state.world_info
+		};
+		
+		info!("Calc new world info: {:?}", new_world_info);
 		
 		let comp_stream = self.comp_stream.take().unwrap();
 		
-		tokio::spawn(transfer_world_data(comp_stream.0, comp_stream.1, world_data.into()));
+		tokio::spawn(async move {
+			if let Err(err) = transfer_world_data(comp_stream.0, comp_stream.1, world_description, chunks).await {
+				error!("Error trying to transfer world data: {:?}", err);
+			}
+		});
 		
-		// std::fs::write(
-		// 	"joe.zip",
-		// 	&world_data[..state.world_info.world_size as usize],
-		// )
-		// 	.unwrap();
+		let mut old_world_info_encoded = Vec::new();
+		let mut new_world_info_encoded = Vec::new();
 		
-		// let new_world_size = world_info.world_size + 1;
-		// let aux_offset = ((world_info.world_size + 502) / 503 * 503) as usize;
-		//
-		// let mut crc_hasher = crate::proxy_testing::FACTORIO_CRC.digest();
-		// crc_hasher.update(&world_data[..new_world_size as usize]);
-		// crc_hasher.update(&world_data[aux_offset..aux_offset + world_info.aux_size as usize]);
-		//
-		// let new_crc = crc_hasher.finalize();
+		state.world_info.encode(&mut old_world_info_encoded);
+		new_world_info.encode(&mut new_world_info_encoded);
 		
+		// TODO: Apply this replacement to all packets after this point
 		for mut held_packet_data in state.held_packets.drain(..) {
-			// let held_packet = parse_packet(held_packet_data.clone()).unwrap();
-			
-			// if held_packet.packet_type == PacketType::ServerToClientHeartbeat {
-			// 	let mut heartbeat = ServerToClientHeartbeatPacket::decode(held_packet.data).unwrap();
-			//
-			// 	if let Some((pak_world_info, _)) = &mut heartbeat.map_ready_to_download_data {
-			// 		pak_world_info.world_size = new_world_size;
-			// 		pak_world_info.world_crc = new_crc;
-			//
-			// 		println!("Updating map ready packet with new world info");
-			// 		held_packet_data = heartbeat.as_factorio_packet().encode();
-			// 	}
-			// }
+			if let Some(pos) = held_packet_data.windows(old_world_info_encoded.len()).position(|w| w == old_world_info_encoded) {
+				let mut new_packet_data = BytesMut::from(held_packet_data);
+				new_packet_data[pos..pos + old_world_info_encoded.len()].copy_from_slice(&new_world_info_encoded);
+				
+				held_packet_data = new_packet_data.freeze();
+			}
 			
 			out_packets.push((held_packet_data, PacketDirection::ToClient));
 		}
@@ -304,8 +321,33 @@ impl ServerProxyState {
 	}
 }
 
-async fn transfer_world_data(mut send_stream: quinn::SendStream, recv_stream: quinn::RecvStream, world_data: Bytes) {
-	info!("Transfering world data");
+async fn transfer_world_data(
+	mut send_stream: quinn::SendStream,
+	mut recv_stream: quinn::RecvStream,
+	world_description: FactorioWorldDescription,
+	chunks: HashMap<ChunkKey, Bytes>,
+) -> anyhow::Result<()> {
+	info!("Transferring world data");
 	
-	send_stream.write_all(&world_data).await.unwrap();
+	protocol::send_message(&mut send_stream, WorldReadyMessage {
+		world: world_description,
+	}).await?;
+	
+	let mut buffer = BytesMut::new();
+	
+	while let Ok(request) =
+		protocol::recv_message::<RequestChunksMessage>(&mut recv_stream, &mut buffer).await
+	{
+		let response = SendChunksMessage {
+			chunks: request.requested_chunks.iter()
+				.map(|&key| chunks[&key].clone())
+				.collect()
+		};
+		
+		info!("Send chunk batch");
+		
+		protocol::send_message(&mut send_stream, response).await?;
+	}
+	
+	Ok(())
 }

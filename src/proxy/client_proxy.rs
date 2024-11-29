@@ -1,7 +1,12 @@
-use crate::protocol::Datagram;
+use crate::chunk_cache::ChunkCache;
+use crate::dedup::WorldReconstructor;
+use crate::factorio_protocol::{FactorioPacket, FactorioPacketHeader, PacketType, TransferBlockPacket, TransferBlockRequestPacket, TRANSFER_BLOCK_SIZE};
+use crate::protocol;
+use crate::protocol::{Datagram, RequestChunksMessage, SendChunksMessage, WorldReadyMessage};
 use crate::proxy::PacketDirection;
 use anyhow::anyhow;
 use bytes::{Bytes, BytesMut};
+use log::{error, info};
 use quinn_proto::VarInt;
 use std::collections::HashMap;
 use std::mem;
@@ -10,9 +15,12 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::select;
 use tokio::sync::mpsc;
-use crate::factorio_protocol::{FactorioPacket, FactorioPacketHeader, PacketType, TransferBlockPacket, TransferBlockRequestPacket, TRANSFER_BLOCK_SIZE};
 
-pub async fn run_client_proxy(socket: Arc<UdpSocket>, connection: Arc<quinn::Connection>) -> anyhow::Result<()> {
+pub async fn run_client_proxy(
+	socket: Arc<UdpSocket>,
+	connection: Arc<quinn::Connection>,
+	chunk_cache: Arc<ChunkCache>,
+) -> anyhow::Result<()> {
 	let mut addr_to_queue: HashMap<SocketAddr, mpsc::Sender<Bytes>> = HashMap::new();
 	let mut id_to_queue: HashMap<VarInt, mpsc::Sender<Bytes>> = HashMap::new();
 	
@@ -45,6 +53,7 @@ pub async fn run_client_proxy(socket: Arc<UdpSocket>, connection: Arc<quinn::Con
 							
 							server_receive_queue: server_receive_queue_rx,
 							client_receive_queue: client_receive_queue_rx,
+							chunk_cache: chunk_cache.clone(),
 						}));
 						
 						addr_to_queue.insert(peer_addr, client_receive_queue_tx);
@@ -76,6 +85,7 @@ struct ProxyClientArgs {
 	
 	server_receive_queue: mpsc::Receiver<Bytes>,
 	client_receive_queue: mpsc::Receiver<Bytes>,
+	chunk_cache: Arc<ChunkCache>,
 }
 
 async fn proxy_client(mut args: ProxyClientArgs) {
@@ -83,14 +93,19 @@ async fn proxy_client(mut args: ProxyClientArgs) {
 	
 	comp_send.write_all(&(args.peer_id.into_inner() as u32).to_le_bytes()).await.unwrap();
 	
-	let (world_data_sender, mut world_data_receiver) = mpsc::channel(8);
+	let (world_data_sender, mut world_data_receiver) = mpsc::channel(32);
 	
-	tokio::spawn(transfer_world_data(comp_send, comp_recv, world_data_sender));
+	tokio::spawn(async {
+		if let Err(err) = transfer_world_data(comp_send, comp_recv, world_data_sender, args.chunk_cache).await {
+			error!("Error trying to transfer world data: {:?}", err);
+		}
+	});
 	
 	let mut buf = BytesMut::new();
 	let mut out_packets = Vec::new();
 	
 	let mut proxy_state = ClientProxyState::new();
+	let mut world_data_done = false;
 	
 	loop {
 		select! {
@@ -105,8 +120,11 @@ async fn proxy_client(mut args: ProxyClientArgs) {
 				
 				out_packets.push((packet_data, PacketDirection::ToClient));
 			}
-			result = world_data_receiver.recv(), if !world_data_receiver.is_closed() => {
-				let Some(new_data) = result else { continue; };
+			result = world_data_receiver.recv(), if !world_data_done => {
+				let Some(new_data) = result else {
+					world_data_done = true;
+					continue;
+				};
 				
 				proxy_state.on_new_world_data(new_data, &mut out_packets);
 			}
@@ -197,9 +215,64 @@ impl ClientProxyState {
 async fn transfer_world_data(
 	mut send_stream: quinn::SendStream,
 	mut recv_stream: quinn::RecvStream,
-	world_data_sender: mpsc::Sender<Bytes>
-) {
-	let world_data = recv_stream.read_to_end(50_000_000).await.unwrap();
+	world_data_sender: mpsc::Sender<Bytes>,
+	chunk_cache: Arc<ChunkCache>,
+) -> anyhow::Result<()> {
+	let mut buf = BytesMut::new();
 	
-	world_data_sender.send(world_data.into()).await.unwrap();
+	let world_ready: WorldReadyMessage = protocol::recv_message(&mut recv_stream, &mut buf).await?;
+	let world_desc = world_ready.world;
+	
+	info!("Got world description: size: {}, crc: {}, file count: {}", world_desc.reconstructed_size, world_desc.reconstructed_crc, world_desc.files.len());
+	
+	let mut all_chunks = world_desc.files.iter()
+		.flat_map(|file| file.content_chunks.iter())
+		.copied()
+		.collect::<Vec<_>>();
+	
+	let mut local_cache = HashMap::new();
+	let mut world_reconstructor = WorldReconstructor::new();
+	
+	for file_desc in &world_desc.files {
+		info!("Reconstructing file {}", &file_desc.file_name);
+		
+		loop {
+			match world_reconstructor.reconstruct_world_file(file_desc, &mut local_cache, &mut buf) {
+				Ok(data_blocks) => {
+					world_data_sender.send(data_blocks.0).await?;
+					world_data_sender.send(data_blocks.1).await?;
+					
+					break;
+				}
+				Err(_) => {
+					if all_chunks.is_empty() {
+						panic!("Emptied chunk list but reconstructor wants more data");
+					}
+					
+					if let Some(batch) =
+						chunk_cache.get_chunks_batched(&mut all_chunks, &mut local_cache, 512).await
+					{
+						protocol::send_message(&mut send_stream, RequestChunksMessage {
+							requested_chunks: batch.batch_keys().to_vec(),
+						}).await?;
+						
+						let response: SendChunksMessage = protocol::recv_message(&mut recv_stream, &mut buf).await?;
+						
+						for (&key, chunk) in batch.batch_keys().iter().zip(response.chunks.iter()) {
+							local_cache.insert(key, chunk.clone());
+						}
+						
+						batch.fulfill(&response.chunks);
+					}
+				}
+			}
+		}
+	}
+	
+	info!("Sending final data");
+	
+	let last_data = world_reconstructor.finalize_world_file(&world_desc)?;
+	world_data_sender.send(last_data).await?;
+	
+	Ok(())
 }
