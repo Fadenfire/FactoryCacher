@@ -133,15 +133,20 @@ enum ServerProxyPhase {
 }
 
 struct DownloadingWorldState {
-	held_packets: Vec<Bytes>,
 	world_info: MapReadyForDownloadData,
 	world_block_count: u32,
+	download_start_time: Instant,
+	
+	held_packets: Vec<Bytes>,
 	received_blocks: Vec<TransferBlockPacket>,
 	block_request_queue: BTreeSet<u32>,
+	inflight_block_requests: BTreeSet<u32>,
 	last_block_time: Instant,
 }
 
 impl ServerProxyState {
+	const INFLIGHT_BLOCK_REQUEST_LIMIT: usize = 16;
+	
 	pub fn new(comp_stream: (quinn::SendStream, quinn::RecvStream)) -> Self {
 		Self {
 			phase: ServerProxyPhase::WaitingForWorld,
@@ -175,23 +180,21 @@ impl ServerProxyState {
 					FactorioPacketHeader::decode(in_packet_data.clone())
 				{
 					if header.packet_type == PacketType::TransferBlock {
-						let Ok(transfer_block) = TransferBlockPacket::decode(msg_data)
-						else { return; };
+						let Ok(transfer_block) = TransferBlockPacket::decode(msg_data) else { return; };
 						
-						if state.block_request_queue.remove(&transfer_block.block_id) {
+						if state.inflight_block_requests.remove(&transfer_block.block_id) ||
+							state.block_request_queue.remove(&transfer_block.block_id)
+						{
 							state.received_blocks.push(transfer_block);
 							
 							state.last_block_time = Instant::now();
 						}
 						
-						if state.block_request_queue.is_empty() {
+						if state.block_request_queue.is_empty() && state.inflight_block_requests.is_empty() {
 							self.finalize_world(out_packets).await;
 							return;
 						} else {
-							let next_block_id = *state.block_request_queue.first().unwrap();
-							let request = TransferBlockRequestPacket { block_id: next_block_id };
-							
-							out_packets.push((request.encode_full_packet(), PacketDirection::ToServer));
+							Self::request_next_blocks(state, out_packets);
 						}
 					} else {
 						state.held_packets.push(in_packet_data);
@@ -199,10 +202,12 @@ impl ServerProxyState {
 				}
 				
 				if state.last_block_time.elapsed() > Duration::from_millis(100) {
-					let next_block_id = *state.block_request_queue.first().unwrap();
-					let request = TransferBlockRequestPacket { block_id: next_block_id };
+					for &block_id in &state.inflight_block_requests {
+						let request = TransferBlockRequestPacket { block_id };
+						out_packets.push((request.encode_full_packet(), PacketDirection::ToServer));
+					}
 					
-					out_packets.push((request.encode_full_packet(), PacketDirection::ToServer));
+					Self::request_next_blocks(state, out_packets);
 				}
 				
 				return;
@@ -227,19 +232,31 @@ impl ServerProxyState {
 		
 		let total_block_count = world_block_count + aux_block_count;
 		
-		let state = DownloadingWorldState {
-			held_packets: vec![in_packet_data],
+		let mut state = DownloadingWorldState {
 			world_info,
 			world_block_count,
+			download_start_time: Instant::now(),
+			
+			held_packets: vec![in_packet_data],
 			received_blocks: Vec::new(),
 			block_request_queue: BTreeSet::from_iter(0..total_block_count),
+			inflight_block_requests: BTreeSet::new(),
 			last_block_time: Instant::now(),
 		};
 		
-		self.phase = ServerProxyPhase::DownloadingWorld(state);
+		Self::request_next_blocks(&mut state, out_packets);
 		
-		let first_request = TransferBlockRequestPacket { block_id: 0 };
-		out_packets.push((first_request.encode_full_packet(), PacketDirection::ToServer));
+		self.phase = ServerProxyPhase::DownloadingWorld(state);
+	}
+	
+	fn request_next_blocks(state: &mut DownloadingWorldState, out_packets: &mut Vec<(Bytes, PacketDirection)>) {
+		while state.inflight_block_requests.len() < Self::INFLIGHT_BLOCK_REQUEST_LIMIT {
+			let Some(block_id) = state.block_request_queue.pop_first() else { return; };
+			state.inflight_block_requests.insert(block_id);
+			
+			let request = TransferBlockRequestPacket { block_id };
+			out_packets.push((request.encode_full_packet(), PacketDirection::ToServer));
+		}
 	}
 	
 	async fn finalize_world(&mut self, out_packets: &mut Vec<(Bytes, PacketDirection)>) {
@@ -248,7 +265,7 @@ impl ServerProxyState {
 			_ => unreachable!(),
 		};
 		
-		info!("Finished downloading world");
+		info!("Downloading world took {}ms", state.download_start_time.elapsed().as_millis());
 		
 		state.received_blocks.sort_by_key(|block| block.block_id);
 		
@@ -261,6 +278,13 @@ impl ServerProxyState {
 		let received_data = received_data.freeze();
 		
 		let aux_data_offset = state.world_block_count * TRANSFER_BLOCK_SIZE;
+		
+		if received_data.len() < (aux_data_offset as usize + state.world_info.aux_size as usize) {
+			error!("Received data length is smaller than expected length, received length: {}", received_data.len());
+			
+			self.phase = ServerProxyPhase::Done;
+			return;
+		}
 		
 		let world_data = received_data.slice(..state.world_info.world_size as usize);
 		let aux_data = received_data.slice(aux_data_offset as usize..(aux_data_offset + state.world_info.aux_size) as usize);
