@@ -39,7 +39,7 @@ impl Datagram {
 }
 
 const ZSTD_COMPRESSION_LEVEL: i32 = 11;
-const MESSAGE_SIZE_LIMIT: usize = 10_000_000;
+const MESSAGE_SIZE_LIMIT: usize = 20_000_000;
 
 pub fn encode_message<T: Serialize>(message: &T) -> anyhow::Result<Bytes> {
 	let mut data: Vec<u8> = Vec::new();
@@ -88,24 +88,6 @@ pub async fn read_message<R: AsyncRead + Unpin>(io: &mut R, buffer: &mut BytesMu
 	
 	Ok(buffer.split().freeze())
 }
-
-// pub async fn send_message<T>(io: &mut (impl AsyncWrite + Unpin), message: T) -> anyhow::Result<()>
-// where
-// 	T: Serialize + Send + 'static,
-// {
-// 	let msg_data = tokio::task::spawn_blocking(move || encode_message(&message)).await??;
-// 	
-// 	write_message(io, msg_data).await
-// }
-// 
-// pub async fn recv_message<T>(io: &mut (impl AsyncRead + Unpin), buffer: &mut BytesMut) -> anyhow::Result<T>
-// where
-// 	T: DeserializeOwned + Send + 'static,
-// {
-// 	let msg_data = read_message(io, buffer).await?;
-// 	
-// 	tokio::task::spawn_blocking(move || decode_message::<T>(&msg_data)).await?
-// }
 
 #[derive(Deserialize, Serialize)]
 pub struct WorldReadyMessage {

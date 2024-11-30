@@ -198,7 +198,7 @@ impl ClientProxyState {
 			}
 		}
 		
-		if (Instant::now() - self.last_block_request) > WORLD_DATA_TIMEOUT {
+		if !self.world_data.is_empty() && self.last_block_request.elapsed() > WORLD_DATA_TIMEOUT {
 			info!("Cleaning up local copy of world data");
 			
 			self.world_data = Vec::new();
@@ -244,9 +244,10 @@ async fn transfer_world_data(
 ) -> anyhow::Result<()> {
 	let mut buf = BytesMut::new();
 	
-	let world_ready_message_data = protocol::read_message(&mut recv_stream, &mut buf).await?;
-	
 	let mut total_transferred = 0;
+	let start_time = Instant::now();
+	
+	let world_ready_message_data = protocol::read_message(&mut recv_stream, &mut buf).await?;
 	total_transferred += world_ready_message_data.len() as u64;
 	
 	info!("Received world description, size: {}B", utils::abbreviate_number(world_ready_message_data.len() as u64));
@@ -282,7 +283,7 @@ async fn transfer_world_data(
 					}
 					
 					if let Some(batch) =
-						chunk_cache.get_chunks_batched(&mut all_chunks, &mut local_cache, 1024).await
+						chunk_cache.get_chunks_batched(&mut all_chunks, &mut local_cache, 512).await
 					{
 						let request_data = protocol::encode_message_async(RequestChunksMessage {
 							requested_chunks: batch.batch_keys().to_vec(),
@@ -311,7 +312,10 @@ async fn transfer_world_data(
 		}
 	}
 	
-	info!("Finished receiving world, total transferred: {}B, original size: {}B, dedup ratio: {:.2}%",
+	let elapsed = start_time.elapsed();
+	
+	info!("Finished receiving world in {}s, total transferred: {}B, original size: {}B, dedup ratio: {:.2}%",
+		elapsed.as_secs(),
 		utils::abbreviate_number(total_transferred),
 		utils::abbreviate_number(world_desc.original_world_size as u64),
 		(total_transferred as f64 / world_desc.original_world_size as f64) * 100.0,

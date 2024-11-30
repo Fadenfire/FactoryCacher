@@ -92,7 +92,7 @@ async fn proxy_server(mut args: ProxyServerArgs) {
                 // Drop any packets that don't originate from the server
                 if remote_addr != args.factorio_addr { continue; }
 
-                proxy_state.on_packet_from_server(buf.split().freeze(), &mut out_packets);
+                proxy_state.on_packet_from_server(buf.split().freeze(), &mut out_packets).await;
             }
             result = args.receive_queue_rx.recv() => {
                 let Some(packet_data) = result else { return; };
@@ -149,7 +149,7 @@ impl ServerProxyState {
 		}
 	}
 	
-	pub fn on_packet_from_server(
+	pub async fn on_packet_from_server(
 		&mut self,
 		in_packet_data: Bytes,
 		out_packets: &mut Vec<(Bytes, PacketDirection)>,
@@ -185,7 +185,7 @@ impl ServerProxyState {
 						}
 						
 						if state.block_request_queue.is_empty() {
-							self.finalize_world(out_packets);
+							self.finalize_world(out_packets).await;
 							return;
 						} else {
 							let next_block_id = *state.block_request_queue.first().unwrap();
@@ -198,7 +198,7 @@ impl ServerProxyState {
 					}
 				}
 				
-				if (Instant::now() - state.last_block_time) > Duration::from_millis(100) {
+				if state.last_block_time.elapsed() > Duration::from_millis(100) {
 					let next_block_id = *state.block_request_queue.first().unwrap();
 					let request = TransferBlockRequestPacket { block_id: next_block_id };
 					
@@ -220,6 +220,7 @@ impl ServerProxyState {
 		out_packets: &mut Vec<(Bytes, PacketDirection)>,
 	) {
 		info!("Got world info: {:?}", world_info);
+		info!("Downloading world from server");
 		
 		let world_block_count = (world_info.world_size + TRANSFER_BLOCK_SIZE - 1) / TRANSFER_BLOCK_SIZE;
 		let aux_block_count = (world_info.aux_size + TRANSFER_BLOCK_SIZE - 1) / TRANSFER_BLOCK_SIZE;
@@ -241,37 +242,46 @@ impl ServerProxyState {
 		out_packets.push((first_request.encode_full_packet(), PacketDirection::ToServer));
 	}
 	
-	fn finalize_world(&mut self, out_packets: &mut Vec<(Bytes, PacketDirection)>) {
+	async fn finalize_world(&mut self, out_packets: &mut Vec<(Bytes, PacketDirection)>) {
 		let state = match &mut self.phase {
 			ServerProxyPhase::DownloadingWorld(state) => state,
 			_ => unreachable!(),
 		};
 		
-		info!("Got last block");
+		info!("Finished downloading world");
 		
 		state.received_blocks.sort_by_key(|block| block.block_id);
 		
-		let mut received_data = Vec::new();
+		let mut received_data = BytesMut::new();
 		
 		for block in state.received_blocks.drain(..) {
 			received_data.extend_from_slice(&block.data);
 		}
 		
+		let received_data = received_data.freeze();
+		
 		let aux_data_offset = state.world_block_count * TRANSFER_BLOCK_SIZE;
 		
-		let world_data = &received_data[..state.world_info.world_size as usize];
-		let aux_data = &received_data[aux_data_offset as usize..(aux_data_offset + state.world_info.aux_size) as usize];
+		let world_data = received_data.slice(..state.world_info.world_size as usize);
+		let aux_data = received_data.slice(aux_data_offset as usize..(aux_data_offset + state.world_info.aux_size) as usize);
 		
-		let (world_description, chunks) =
-			match dedup::deconstruct_world(world_data, aux_data) {
-				Ok(result) => result,
-				Err(err) => {
-					error!("Error trying to deconstruct world: {:?}", err);
-					
-					self.phase = ServerProxyPhase::Done;
-					return;
-				}
-			};
+		let start_time = Instant::now();
+		
+		let result: anyhow::Result<_> = async {
+			tokio::task::spawn_blocking(move || dedup::deconstruct_world(&world_data, &aux_data)).await?
+		}.await;
+		
+		info!("Deconstructing world took {}ms", start_time.elapsed().as_millis());
+		
+		let (world_description, chunks) = match result {
+			Ok(result) => result,
+			Err(err) => {
+				error!("Error trying to deconstruct world: {:?}", err);
+				
+				self.phase = ServerProxyPhase::Done;
+				return;
+			}
+		};
 		
 		let new_world_info = MapReadyForDownloadData {
 			world_size: world_description.world_size,
@@ -279,7 +289,7 @@ impl ServerProxyState {
 			..state.world_info
 		};
 		
-		info!("Calc new world info: {:?}", new_world_info);
+		info!("Reconstructed world info: {:?}", new_world_info);
 		
 		let comp_stream = self.comp_stream.take().unwrap();
 		
@@ -321,6 +331,7 @@ async fn transfer_world_data(
 	
 	let original_world_size = world_description.original_world_size as u64;
 	let mut total_transferred = 0;
+	let start_time = Instant::now();
 	
 	let world_ready_message = protocol::encode_message_async(WorldReadyMessage {
 		world: world_description,
@@ -353,10 +364,14 @@ async fn transfer_world_data(
 		protocol::write_message(&mut send_stream, response_data).await?;
 	}
 	
-	info!("Finished sending world, total transferred: {}B, original size: {}B, dedup ratio: {:.2}%",
+	let elapsed = start_time.elapsed();
+	
+	info!("Finished sending world in {}s, total transferred: {}B, original size: {}B, dedup ratio: {:.2}%, avg rate: {}B/s",
+		elapsed.as_secs(),
 		utils::abbreviate_number(total_transferred),
 		utils::abbreviate_number(original_world_size),
 		(total_transferred as f64 / original_world_size as f64) * 100.0,
+		utils::abbreviate_number(total_transferred / elapsed.as_secs()),
 	);
 	
 	Ok(())

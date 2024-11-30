@@ -78,9 +78,6 @@ async fn main() {
 		Subcommand::Client(client_args) => subcommand_client(client_args).await,
 		Subcommand::Server(server_args) => subcommand_server(server_args).await,
 	}
-    
-    // dedup_testing::dedup_test();
-    // proxy_testing::proxy_test();
 }
 
 async fn subcommand_client(args: ClientArgs) {
