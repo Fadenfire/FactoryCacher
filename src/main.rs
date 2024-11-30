@@ -4,7 +4,9 @@ use argh::FromArgs;
 use log::{error, info};
 use quinn::Endpoint;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use time::util::local_offset::Soundness;
 use tokio::net::{lookup_host, UdpSocket};
 use tokio::select;
@@ -49,6 +51,18 @@ struct ClientArgs {
 	#[argh(option, short = 's')]
 	/// server address
 	server_address: String,
+	
+	#[argh(option, short = 'c')]
+	/// location of cache file, defaults to persistent-cache in the CWD
+	cache_path: Option<PathBuf>,
+	
+	#[argh(option, default = "500_000_000")]
+	/// max size of the chunk cache
+	cache_limit: u64,
+	
+	#[argh(option, default = "60")]
+	/// how often to try to save the cache in seconds
+	cache_save_interval: u64,
 }
 
 #[derive(FromArgs)]
@@ -81,8 +95,6 @@ async fn main() {
 }
 
 async fn subcommand_client(args: ClientArgs) {
-	info!("Connecting...");
-	
 	let server_address = lookup_host(args.server_address.as_str()).await
 		.expect("Error looking up host")
 		.next()
@@ -103,10 +115,21 @@ async fn subcommand_client(args: ClientArgs) {
 	}
 	
 	endpoint.close(0u32.into(), b"quit");
-	endpoint.wait_idle().await;
+	
+	select! {
+		_ = endpoint.wait_idle() => {},
+		_ = tokio::signal::ctrl_c() => {}
+	}
+	
+	info!("Shutdown");
 }
 
 async fn run_client(endpoint: &Endpoint, server_address: SocketAddr, args: &ClientArgs) -> anyhow::Result<()> {
+	let cache_path = args.cache_path.clone()
+		.unwrap_or_else(|| std::path::absolute("persistent-cache").unwrap());
+	
+	info!("Connecting...");
+	
 	let quic_connection = Arc::new(endpoint.connect(server_address, "localhost")?.await.context("QUIC connecting")?);
 	
 	let listen_address = SocketAddr::new(args.host, args.port);
@@ -114,7 +137,22 @@ async fn run_client(endpoint: &Endpoint, server_address: SocketAddr, args: &Clie
 	
 	info!("Connected");
 	
-	let chunk_cache = Arc::new(ChunkCache::new());
+	let chunk_cache;
+	
+	if cache_path.exists() {
+		info!("Loading cache from {}", cache_path.display());
+		
+		chunk_cache = Arc::new(ChunkCache::load_from_file(args.cache_limit, cache_path.clone()).await?);
+		
+		info!("Loaded {} chunks ({}B) from the cache",
+			chunk_cache.len(), utils::abbreviate_number(chunk_cache.total_size()));
+	} else {
+		chunk_cache = Arc::new(ChunkCache::new(args.cache_limit));
+	}
+	
+	info!("The cache has a limit of {}B", utils::abbreviate_number(args.cache_limit));
+	
+	chunk_cache.start_writer(cache_path, Duration::from_secs(args.cache_save_interval));
 	
 	client_proxy::run_client_proxy(socket.clone(), quic_connection.clone(), chunk_cache.clone()).await?;
 	
@@ -136,7 +174,13 @@ async fn subcommand_server(args: ServerArgs) {
 	}
 	
 	endpoint.close(0u32.into(), b"quit");
-	endpoint.wait_idle().await;
+	
+	select! {
+		_ = endpoint.wait_idle() => {},
+		_ = tokio::signal::ctrl_c() => {}
+	}
+	
+	info!("Shutdown");
 }
 
 async fn run_server(endpoint: &Endpoint, factorio_address: SocketAddr) -> anyhow::Result<()> {

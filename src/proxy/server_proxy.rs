@@ -395,7 +395,7 @@ async fn transfer_world_data(
 		utils::abbreviate_number(total_transferred),
 		utils::abbreviate_number(original_world_size),
 		(total_transferred as f64 / original_world_size as f64) * 100.0,
-		utils::abbreviate_number(total_transferred / elapsed.as_secs()),
+		utils::abbreviate_number((total_transferred as f64 / elapsed.as_millis() as f64 * 1000.0) as u64),
 	);
 	
 	Ok(())

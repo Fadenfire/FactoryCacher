@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
-quinn = "0.11"
+quinn = { version = "0.11", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }
 quinn-proto = { version = "0.11", default-features = false }
 rustls = { version = "0.23", default-features = false }
 argh = "0.1"
@@ -24,3 +24,4 @@ crc = "3.0"
 log = "0.4"
 simplelog = "0.12"
 time = { version = "0.3", features = ["macros"] }
+hashlink = "0.9"

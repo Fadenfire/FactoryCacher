@@ -19,7 +19,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-const WORLD_DATA_TIMEOUT: Duration = Duration::from_secs(60);
+const WORLD_DATA_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub async fn run_client_proxy(
 	socket: Arc<UdpSocket>,
@@ -244,10 +244,11 @@ async fn transfer_world_data(
 ) -> anyhow::Result<()> {
 	let mut buf = BytesMut::new();
 	
+	let world_ready_message_data = protocol::read_message(&mut recv_stream, &mut buf).await?;
+	
 	let mut total_transferred = 0;
 	let start_time = Instant::now();
 	
-	let world_ready_message_data = protocol::read_message(&mut recv_stream, &mut buf).await?;
 	total_transferred += world_ready_message_data.len() as u64;
 	
 	info!("Received world description, size: {}B", utils::abbreviate_number(world_ready_message_data.len() as u64));
@@ -320,6 +321,8 @@ async fn transfer_world_data(
 		utils::abbreviate_number(world_desc.original_world_size as u64),
 		(total_transferred as f64 / world_desc.original_world_size as f64) * 100.0,
 	);
+	
+	chunk_cache.mark_dirty();
 	
 	info!("Reconstructing final data");
 	

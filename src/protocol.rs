@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const UDP_PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+pub const UDP_PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Datagram {
