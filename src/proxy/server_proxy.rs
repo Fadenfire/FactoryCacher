@@ -10,6 +10,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
+use memchr::memmem::Finder;
 use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
 use tokio::select;
@@ -129,6 +130,7 @@ struct ServerProxyState {
 enum ServerProxyPhase {
 	WaitingForWorld,
 	DownloadingWorld(DownloadingWorldState),
+	FilteringPackets(FilteringPacketsState),
 	Done,
 }
 
@@ -144,6 +146,12 @@ struct DownloadingWorldState {
 	last_block_time: Instant,
 }
 
+struct FilteringPacketsState {
+	finder: Finder<'static>,
+	replace_with: Bytes,
+	last_replace: Instant,
+}
+
 impl ServerProxyState {
 	const INFLIGHT_BLOCK_REQUEST_LIMIT: usize = 16;
 	
@@ -156,7 +164,7 @@ impl ServerProxyState {
 	
 	pub async fn on_packet_from_server(
 		&mut self,
-		in_packet_data: Bytes,
+		mut in_packet_data: Bytes,
 		out_packets: &mut Vec<(Bytes, PacketDirection)>,
 	) {
 		match &mut self.phase {
@@ -211,6 +219,15 @@ impl ServerProxyState {
 				}
 				
 				return;
+			}
+			ServerProxyPhase::FilteringPackets(state) => {
+				in_packet_data = Self::filter_packet(state, in_packet_data);
+				
+				if state.last_replace.elapsed() > Duration::from_secs(30) {
+					info!("Stopped filtering packets");
+					
+					self.phase = ServerProxyPhase::Done;
+				}
 			}
 			ServerProxyPhase::Done => {}
 		}
@@ -329,19 +346,36 @@ impl ServerProxyState {
 		state.world_info.encode(&mut old_world_info_encoded);
 		new_world_info.encode(&mut new_world_info_encoded);
 		
-		// TODO: Apply this replacement to all packets after this point
-		for mut held_packet_data in state.held_packets.drain(..) {
-			if let Some(pos) = held_packet_data.windows(old_world_info_encoded.len()).position(|w| w == old_world_info_encoded) {
-				let mut new_packet_data = BytesMut::from(held_packet_data);
-				new_packet_data[pos..pos + old_world_info_encoded.len()].copy_from_slice(&new_world_info_encoded);
-				
-				held_packet_data = new_packet_data.freeze();
-			}
+		let mut filtering_state = FilteringPacketsState {
+			finder: Finder::new(&old_world_info_encoded).into_owned(),
+			replace_with: new_world_info_encoded.into(),
+			last_replace: Instant::now(),
+		};
+		
+		for held_packet_data in state.held_packets.drain(..) {
+			let held_packet_data = Self::filter_packet(&mut filtering_state, held_packet_data);
 			
 			out_packets.push((held_packet_data, PacketDirection::ToClient));
 		}
 		
-		self.phase = ServerProxyPhase::Done;
+		self.phase = ServerProxyPhase::FilteringPackets(filtering_state);
+	}
+	
+	fn filter_packet(state: &mut FilteringPacketsState, packet_data: Bytes) -> Bytes {
+		let mut new_packet_data = None;
+		
+		for pos in state.finder.find_iter(&packet_data) {
+			let new_packet_data = new_packet_data
+				.get_or_insert_with(|| BytesMut::from(packet_data.as_ref()));
+			
+			new_packet_data[pos..pos + state.finder.needle().len()].copy_from_slice(&state.replace_with);
+		}
+		
+		if new_packet_data.is_some() {
+			state.last_replace = Instant::now();
+		}
+		
+		new_packet_data.map(BytesMut::freeze).unwrap_or(packet_data)
 	}
 }
 

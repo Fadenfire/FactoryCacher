@@ -25,3 +25,4 @@ log = "0.4"
 simplelog = "0.12"
 time = { version = "0.3", features = ["macros"] }
 hashlink = "0.9"
+memchr = "2.0"

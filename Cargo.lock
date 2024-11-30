@@ -257,6 +257,7 @@ dependencies = [
  "crc",
  "hashlink",
  "log",
+ "memchr",
  "miniz_oxide",
  "quinn",
  "quinn-proto",

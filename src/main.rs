@@ -1,16 +1,16 @@
+use crate::chunk_cache::ChunkCache;
 use crate::proxy::{client_proxy, server_proxy};
 use anyhow::Context;
 use argh::FromArgs;
 use log::{error, info};
 use quinn::Endpoint;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use time::util::local_offset::Soundness;
 use tokio::net::{lookup_host, UdpSocket};
 use tokio::select;
-use crate::chunk_cache::ChunkCache;
 
 mod chunker;
 mod factorio_protocol;
