@@ -21,6 +21,7 @@ mod protocol;
 mod zip_writer;
 mod dedup;
 mod chunk_cache;
+mod crc_rev;
 
 #[derive(FromArgs)]
 /// Factorio cacher
@@ -84,7 +85,7 @@ struct ServerArgs {
 
 #[tokio::main()]
 async fn main() {
-    let args: Args = argh::from_env();
+	let args: Args = argh::from_env();
 	
 	setup_logging();
 	
