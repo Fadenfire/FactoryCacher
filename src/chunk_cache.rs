@@ -87,17 +87,19 @@ impl ChunkCache {
 		
 		let chunk_count = cache_entries.len();
 		
-		tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+		let compressed_size = tokio::task::spawn_blocking(move || -> anyhow::Result<u64> {
 			let temp_path = cache_path.with_extension("tmp");
 			
 			write_chunk_cache(&cache_entries, &temp_path)?;
 			
+			let written_size = std::fs::metadata(&temp_path)?.len();
 			std::fs::rename(&temp_path, &cache_path)?;
 			
-			Ok(())
+			Ok(written_size)
 		}).await??;
 		
-		info!("Saved {} chunks to the cache ({}B)", chunk_count, utils::abbreviate_number(total_size));
+		info!("Saved {} chunks to the cache ({}B, {}B compressed)", chunk_count,
+			utils::abbreviate_number(total_size), utils::abbreviate_number(compressed_size));
 		
 		Ok(())
 	}
