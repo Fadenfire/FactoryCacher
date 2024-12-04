@@ -262,7 +262,7 @@ async fn transfer_world_data(
 		.collect::<Vec<_>>();
 	
 	info!("World description: size: {}, crc: {}, file count: {}, total chunks: {}",
-		world_desc.total_size, world_desc.reconstructed_crc, world_desc.files.len(), all_chunks.len());
+		world_ready.new_info.world_size, world_ready.new_info.world_crc, world_desc.files.len(), all_chunks.len());
 	
 	let mut local_cache = HashMap::new();
 	let mut world_reconstructor = WorldReconstructor::new();
@@ -318,15 +318,17 @@ async fn transfer_world_data(
 	info!("Finished receiving world in {}s, total transferred: {}B, original size: {}B, dedup ratio: {:.2}%",
 		elapsed.as_secs(),
 		utils::abbreviate_number(total_transferred),
-		utils::abbreviate_number(world_desc.original_world_size as u64),
-		(total_transferred as f64 / world_desc.original_world_size as f64) * 100.0,
+		utils::abbreviate_number(world_ready.old_info.world_size as u64),
+		(total_transferred as f64 / world_ready.old_info.world_size as f64) * 100.0,
 	);
 	
 	chunk_cache.mark_dirty();
 	
 	info!("Reconstructing final data");
 	
-	let last_data = world_reconstructor.finalize_world_file(&world_desc)?;
+	let last_data = world_reconstructor.finalize_world_file(
+		&world_desc, world_ready.new_info.world_size as usize, world_ready.new_info.world_crc)?;
+	
 	world_data_sender.send(last_data).await?;
 	
 	Ok(())

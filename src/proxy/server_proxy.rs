@@ -1,16 +1,17 @@
-use crate::dedup::{ChunkKey, FactorioWorldDescription};
-use crate::factorio_protocol::{FactorioPacket, FactorioPacketHeader, MapReadyForDownloadData, PacketType, ServerToClientHeartbeatPacket, TransferBlockPacket, TransferBlockRequestPacket, TRANSFER_BLOCK_SIZE};
+use crate::factorio_protocol::{FactorioPacket, FactorioPacketHeader, FactorioWorldMetadata, PacketType, ServerToClientHeartbeatPacket, TransferBlockPacket, TransferBlockRequestPacket, TRANSFER_BLOCK_SIZE};
 use crate::protocol::{Datagram, RequestChunksMessage, SendChunksMessage, WorldReadyMessage, UDP_PEER_IDLE_TIMEOUT};
 use crate::proxy::{PacketDirection, UDP_QUEUE_SIZE};
 use crate::{dedup, protocol, utils};
+use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use log::{error, info};
+use memchr::memmem::Finder;
 use quinn_proto::VarInt;
 use std::collections::{BTreeSet, HashMap};
+use std::mem;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use memchr::memmem::Finder;
 use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
 use tokio::select;
@@ -124,22 +125,22 @@ async fn proxy_server(mut args: ProxyServerArgs) {
 
 struct ServerProxyState {
 	phase: ServerProxyPhase,
+	packet_filter: Option<FilteringPacketsState>,
 	comp_stream: Option<(quinn::SendStream, quinn::RecvStream)>,
 }
 
 enum ServerProxyPhase {
 	WaitingForWorld,
 	DownloadingWorld(DownloadingWorldState),
-	FilteringPackets(FilteringPacketsState),
 	Done,
 }
 
 struct DownloadingWorldState {
-	world_info: MapReadyForDownloadData,
+	world_info: FactorioWorldMetadata,
+	new_world_info: FactorioWorldMetadata,
 	world_block_count: u32,
 	download_start_time: Instant,
 	
-	held_packets: Vec<Bytes>,
 	received_blocks: Vec<TransferBlockPacket>,
 	block_request_queue: BTreeSet<u32>,
 	inflight_block_requests: BTreeSet<u32>,
@@ -158,6 +159,7 @@ impl ServerProxyState {
 	pub fn new(comp_stream: (quinn::SendStream, quinn::RecvStream)) -> Self {
 		Self {
 			phase: ServerProxyPhase::WaitingForWorld,
+			packet_filter: None,
 			comp_stream: Some(comp_stream),
 		}
 	}
@@ -199,13 +201,12 @@ impl ServerProxyState {
 						}
 						
 						if state.block_request_queue.is_empty() && state.inflight_block_requests.is_empty() {
-							self.finalize_world(out_packets).await;
-							return;
+							self.finalize_world();
 						} else {
 							Self::request_next_blocks(state, out_packets);
 						}
-					} else {
-						state.held_packets.push(in_packet_data);
+						
+						return;
 					}
 				}
 				
@@ -217,19 +218,18 @@ impl ServerProxyState {
 					
 					Self::request_next_blocks(state, out_packets);
 				}
-				
-				return;
-			}
-			ServerProxyPhase::FilteringPackets(state) => {
-				in_packet_data = Self::filter_packet(state, in_packet_data);
-				
-				if state.last_replace.elapsed() > Duration::from_secs(30) {
-					info!("Stopped filtering packets");
-					
-					self.phase = ServerProxyPhase::Done;
-				}
 			}
 			ServerProxyPhase::Done => {}
+		}
+		
+		if let Some(filtering_state) = &mut self.packet_filter {
+			in_packet_data = Self::filter_packet(filtering_state, in_packet_data);
+			
+			if filtering_state.last_replace.elapsed() > Duration::from_secs(30) {
+				info!("Stopped filtering packets");
+				
+				self.packet_filter = None;
+			}
 		}
 		
 		out_packets.push((in_packet_data, PacketDirection::ToClient));
@@ -237,12 +237,37 @@ impl ServerProxyState {
 	
 	fn transition_to_downloading_world(
 		&mut self,
-		in_packet_data: Bytes,
-		world_info: MapReadyForDownloadData,
+		mut in_packet_data: Bytes,
+		world_info: FactorioWorldMetadata,
 		out_packets: &mut Vec<(Bytes, PacketDirection)>,
 	) {
 		info!("Got world info: {:?}", world_info);
-		info!("Downloading world from server");
+		
+		let estimated_reconstructed_world_size = world_info.world_size + world_info.world_size / 10;
+		
+		info!("Estimated reconstructed world size: {}", estimated_reconstructed_world_size);
+		
+		let new_world_info = FactorioWorldMetadata {
+			world_size: estimated_reconstructed_world_size,
+			..world_info
+		};
+		
+		let mut old_world_info_encoded = Vec::new();
+		let mut new_world_info_encoded = Vec::new();
+		
+		world_info.encode(&mut old_world_info_encoded);
+		new_world_info.encode(&mut new_world_info_encoded);
+		
+		let mut filtering_state = FilteringPacketsState {
+			finder: Finder::new(&old_world_info_encoded).into_owned(),
+			replace_with: new_world_info_encoded.into(),
+			last_replace: Instant::now(),
+		};
+		
+		in_packet_data = Self::filter_packet(&mut filtering_state, in_packet_data);
+		out_packets.push((in_packet_data, PacketDirection::ToClient));
+		
+		self.packet_filter = Some(filtering_state);
 		
 		let world_block_count = (world_info.world_size + TRANSFER_BLOCK_SIZE - 1) / TRANSFER_BLOCK_SIZE;
 		let aux_block_count = (world_info.aux_size + TRANSFER_BLOCK_SIZE - 1) / TRANSFER_BLOCK_SIZE;
@@ -251,15 +276,17 @@ impl ServerProxyState {
 		
 		let mut state = DownloadingWorldState {
 			world_info,
+			new_world_info,
 			world_block_count,
 			download_start_time: Instant::now(),
 			
-			held_packets: vec![in_packet_data],
 			received_blocks: Vec::new(),
 			block_request_queue: BTreeSet::from_iter(0..total_block_count),
 			inflight_block_requests: BTreeSet::new(),
 			last_block_time: Instant::now(),
 		};
+		
+		info!("Downloading world from server");
 		
 		Self::request_next_blocks(&mut state, out_packets);
 		
@@ -276,89 +303,21 @@ impl ServerProxyState {
 		}
 	}
 	
-	async fn finalize_world(&mut self, out_packets: &mut Vec<(Bytes, PacketDirection)>) {
-		let state = match &mut self.phase {
+	fn finalize_world(&mut self) {
+		let state = match mem::replace(&mut self.phase, ServerProxyPhase::Done) {
 			ServerProxyPhase::DownloadingWorld(state) => state,
 			_ => unreachable!(),
 		};
 		
 		info!("Downloading world took {}ms", state.download_start_time.elapsed().as_millis());
 		
-		state.received_blocks.sort_by_key(|block| block.block_id);
-		
-		let mut received_data = BytesMut::new();
-		
-		for block in state.received_blocks.drain(..) {
-			received_data.extend_from_slice(&block.data);
-		}
-		
-		let received_data = received_data.freeze();
-		
-		let aux_data_offset = state.world_block_count * TRANSFER_BLOCK_SIZE;
-		
-		if received_data.len() < (aux_data_offset as usize + state.world_info.aux_size as usize) {
-			error!("Received data length is smaller than expected length, received length: {}", received_data.len());
-			
-			self.phase = ServerProxyPhase::Done;
-			return;
-		}
-		
-		let world_data = received_data.slice(..state.world_info.world_size as usize);
-		let aux_data = received_data.slice(aux_data_offset as usize..(aux_data_offset + state.world_info.aux_size) as usize);
-		
-		let start_time = Instant::now();
-		
-		let result: anyhow::Result<_> = async {
-			tokio::task::spawn_blocking(move || dedup::deconstruct_world(&world_data, &aux_data)).await?
-		}.await;
-		
-		info!("Deconstructing world took {}ms", start_time.elapsed().as_millis());
-		
-		let (world_description, chunks) = match result {
-			Ok(result) => result,
-			Err(err) => {
-				error!("Error trying to deconstruct world: {:?}", err);
-				
-				self.phase = ServerProxyPhase::Done;
-				return;
-			}
-		};
-		
-		let new_world_info = MapReadyForDownloadData {
-			world_size: world_description.world_size,
-			world_crc: world_description.reconstructed_crc,
-			..state.world_info
-		};
-		
-		info!("Reconstructed world info: {:?}", new_world_info);
-		
 		let comp_stream = self.comp_stream.take().unwrap();
 		
 		tokio::spawn(async move {
-			if let Err(err) = transfer_world_data(comp_stream.0, comp_stream.1, world_description, chunks).await {
+			if let Err(err) = transfer_world_data(comp_stream.0, comp_stream.1, state).await {
 				error!("Error trying to transfer world data: {:?}", err);
 			}
 		});
-		
-		let mut old_world_info_encoded = Vec::new();
-		let mut new_world_info_encoded = Vec::new();
-		
-		state.world_info.encode(&mut old_world_info_encoded);
-		new_world_info.encode(&mut new_world_info_encoded);
-		
-		let mut filtering_state = FilteringPacketsState {
-			finder: Finder::new(&old_world_info_encoded).into_owned(),
-			replace_with: new_world_info_encoded.into(),
-			last_replace: Instant::now(),
-		};
-		
-		for held_packet_data in state.held_packets.drain(..) {
-			let held_packet_data = Self::filter_packet(&mut filtering_state, held_packet_data);
-			
-			out_packets.push((held_packet_data, PacketDirection::ToClient));
-		}
-		
-		self.phase = ServerProxyPhase::FilteringPackets(filtering_state);
 	}
 	
 	fn filter_packet(state: &mut FilteringPacketsState, packet_data: Bytes) -> Bytes {
@@ -382,17 +341,45 @@ impl ServerProxyState {
 async fn transfer_world_data(
 	mut send_stream: quinn::SendStream,
 	mut recv_stream: quinn::RecvStream,
-	world_description: FactorioWorldDescription,
-	chunks: HashMap<ChunkKey, Bytes>,
+	mut downloading_state: DownloadingWorldState,
 ) -> anyhow::Result<()> {
+	let start_time = Instant::now();
+	
+	downloading_state.received_blocks.sort_by_key(|block| block.block_id);
+	
+	let mut received_data = BytesMut::new();
+	
+	for block in downloading_state.received_blocks.drain(..) {
+		received_data.extend_from_slice(&block.data);
+	}
+	
+	let received_data = received_data.freeze();
+	
+	let aux_data_offset = downloading_state.world_block_count * TRANSFER_BLOCK_SIZE;
+	
+	if received_data.len() < (aux_data_offset as usize + downloading_state.world_info.aux_size as usize) {
+		return Err(anyhow::anyhow!("Received data length is smaller than expected length, received length: {}",
+			received_data.len()));
+	}
+	
+	let world_data = received_data.slice(..downloading_state.world_info.world_size as usize);
+	let aux_data = received_data.slice(aux_data_offset as usize..(aux_data_offset + downloading_state.world_info.aux_size) as usize);
+	
+	let (world_description, chunks) =
+		tokio::task::spawn_blocking(move || dedup::deconstruct_world(&world_data, &aux_data)).await?
+			.context("Deconstruction failed")?;
+	
+	info!("Deconstructing world took {}ms", start_time.elapsed().as_millis());
 	info!("Transferring world data");
 	
-	let original_world_size = world_description.original_world_size as u64;
+	let original_world_size = downloading_state.world_info.world_size as u64;
 	let mut total_transferred = 0;
 	let start_time = Instant::now();
 	
 	let world_ready_message = protocol::encode_message_async(WorldReadyMessage {
 		world: world_description,
+		old_info: downloading_state.world_info.clone(),
+		new_info: downloading_state.new_world_info.clone(),
 	}).await?;
 	
 	total_transferred += world_ready_message.len() as u64;

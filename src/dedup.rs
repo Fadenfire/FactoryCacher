@@ -1,5 +1,6 @@
 use crate::chunker::Chunker;
-use crate::factorio_protocol::{FACTORIO_CRC, TRANSFER_BLOCK_SIZE};
+use crate::factorio_protocol::{FACTORIO_CRC, FACTORIO_REV_CRC, TRANSFER_BLOCK_SIZE};
+use crate::rev_crc;
 use crate::zip_writer::ZipWriter;
 use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -14,13 +15,6 @@ pub const RECONSTRUCT_DEFLATE_LEVEL: u8 = 1;
 pub struct FactorioWorldDescription {
 	pub files: Vec<FactorioFileDescription>,
 	pub aux_data: Bytes,
-	pub world_size: u32,
-	
-	pub original_world_size: u32,
-	pub world_block_length: u32,
-	pub aux_block_length: u32,
-	pub total_size: u32,
-	pub reconstructed_crc: u32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -44,23 +38,14 @@ pub struct FactorioFile<'a> {
 
 pub fn deconstruct_world(
 	world_data: &[u8],
-	aux_data: &[u8]
+	aux_data: &[u8],
 ) -> anyhow::Result<(FactorioWorldDescription, HashMap<ChunkKey, Bytes>)> {
 	let mut zip_reader = ZipArchive::new(Cursor::new(&world_data))?;
-	
-	let mut zip_writer = ZipWriter::new();
-	let mut crc_hasher = FACTORIO_CRC.digest();
-	let mut world_size: u32 = 0;
 	
 	let mut chunks = HashMap::new();
 	let mut files = Vec::new();
 	
 	let mut buf = Vec::new();
-	
-	let mut add_data = |data: &[u8]| {
-		crc_hasher.update(data);
-		world_size += data.len() as u32;
-	};
 	
 	for i in 0..zip_reader.len() {
 		let mut zip_file = zip_reader.by_index(i)?;
@@ -71,33 +56,11 @@ pub fn deconstruct_world(
 		let decoded_file = decode_factorio_file(zip_file.name(), &buf)?;
 		
 		files.push(chunk_file(zip_file.name(), &decoded_file, &mut chunks)?);
-		
-		let re_encoded_data = encode_factorio_file(&decoded_file);
-		
-		add_data(&zip_writer.encode_file_header(zip_file.name(), &re_encoded_data));
-		add_data(&re_encoded_data);
 	}
-	
-	add_data(&zip_writer.encode_central_directory());
-	
-	let world_block_length = (world_size + TRANSFER_BLOCK_SIZE - 1) / TRANSFER_BLOCK_SIZE;
-	let aux_block_length = (aux_data.len() as u32 + TRANSFER_BLOCK_SIZE - 1) / TRANSFER_BLOCK_SIZE;
-	
-	let total_size = (world_block_length + aux_block_length) * TRANSFER_BLOCK_SIZE;
-	
-	crc_hasher.update(aux_data);
-	let reconstructed_crc = crc_hasher.finalize();
 	
 	let world = FactorioWorldDescription {
 		files,
 		aux_data: aux_data.to_vec().into(),
-		world_size,
-		
-		original_world_size: world_data.len() as u32,
-		world_block_length,
-		aux_block_length,
-		total_size,
-		reconstructed_crc,
 	};
 	
 	Ok((world, chunks))
@@ -105,7 +68,7 @@ pub fn deconstruct_world(
 
 pub struct WorldReconstructor {
 	zip_writer: ZipWriter,
-	current_size: usize,
+	crc_hasher: crc::Digest<'static, u32>,
 }
 
 pub struct NeedsMoreData;
@@ -114,7 +77,7 @@ impl WorldReconstructor {
 	pub fn new() -> Self {
 		Self {
 			zip_writer: ZipWriter::new(),
-			current_size: 0,
+			crc_hasher: FACTORIO_CRC.digest(),
 		}
 	}
 	
@@ -122,7 +85,7 @@ impl WorldReconstructor {
 		&mut self,
 		file_desc: &FactorioFileDescription,
 		chunks: &HashMap<ChunkKey, Bytes>,
-		buf: &mut BytesMut
+		buf: &mut BytesMut,
 	) -> Result<(Bytes, Bytes), NeedsMoreData> {
 		buf.clear();
 		
@@ -142,34 +105,85 @@ impl WorldReconstructor {
 		let file_data = encode_factorio_file(&file);
 		let header = self.zip_writer.encode_file_header(&file_desc.file_name, &file_data);
 		
-		self.current_size += header.len();
-		self.current_size += file_data.len();
+		self.crc_hasher.update(&header);
+		self.crc_hasher.update(&file_data);
 		
 		Ok((header, file_data.into_owned().into()))
 	}
 	
-	pub fn finalize_world_file(mut self, world_desc: &FactorioWorldDescription) -> anyhow::Result<Bytes> {
-		let mut buf: BytesMut = self.zip_writer.encode_central_directory().into();
+	pub fn finalize_world_file(mut self,
+		world_desc: &FactorioWorldDescription,
+		target_world_size: usize,
+		target_crc: u32,
+	) -> anyhow::Result<Bytes> {
+		let current_size = self.zip_writer.current_size();
+		let zip_footer_size = self.zip_writer.central_directory_size();
 		
-		let old_size = self.current_size;
-		self.current_size += buf.len();
+		// The +4 is for the 4 bytes added in the middle to forge the CRC
+		let total_size = current_size + zip_footer_size + 4;
 		
-		if self.current_size != world_desc.world_size as usize {
-			return Err(anyhow::anyhow!("Client world size doesn't match server client: {}, server: {}",
-				self.current_size, world_desc.world_size));
+		if total_size > target_world_size {
+			return Err(anyhow::anyhow!("Reconstructed world size ({}) won't fit inside of estimated size ({})",
+				total_size, target_world_size));
 		}
 		
-		let world_aligned_length = (world_desc.world_block_length * TRANSFER_BLOCK_SIZE) as usize;
-		let aux_aligned_length = (world_desc.aux_block_length * TRANSFER_BLOCK_SIZE) as usize;
+		// Add padding to match target world size
+		let mut output = BytesMut::zeroed(target_world_size - total_size);
+		self.crc_hasher.update(&output);
 		
-		buf.resize(world_aligned_length - self.current_size + buf.len(), 0);
+		// Advance the zip writer offset to account for the padding
+		// +4 for the CRC forge bytes
+		self.zip_writer.advance_offset(output.len() + 4);
 		
-		buf.put_slice(&world_desc.aux_data);
-		buf.resize(aux_aligned_length - world_desc.aux_data.len() + buf.len(), 0);
+		// Encode central directory
+		let zip_footer = self.zip_writer.encode_central_directory();
 		
-		assert_eq!((old_size + buf.len()) % TRANSFER_BLOCK_SIZE as usize, 0);
+		// The CRC up to this point
+		let forward_crc = self.crc_hasher.clone().finalize();
 		
-		Ok(buf.freeze())
+		// Reverse CRC from the end back to this point, starting with the target CRC
+		let mut rev_crc_hasher = FACTORIO_REV_CRC.digest(target_crc);
+		rev_crc_hasher.update(&world_desc.aux_data);
+		rev_crc_hasher.update(&zip_footer);
+		
+		// Use the forward CRC and reverse CRC to generate 4 bytes that cause the overall CRC to be
+		//  the target CRC
+		let forge_bytes = rev_crc::forge_crc(forward_crc, rev_crc_hasher);
+		
+		// Append the forge bytes and central directory
+		output.put_slice(&forge_bytes);
+		output.put_slice(&zip_footer);
+		
+		// Verify that we padded the world size correctly
+		assert_eq!(current_size + output.len(), target_world_size, "final world size is not equal to target world size");
+		
+		// Verify that we forged the CRC correctly
+		
+		self.crc_hasher.update(&forge_bytes);
+		self.crc_hasher.update(&zip_footer);
+		self.crc_hasher.update(&world_desc.aux_data);
+		
+		let final_crc = self.crc_hasher.finalize();
+		assert_eq!(final_crc, target_crc, "Forging CRC failed");
+		
+		// Now align the world data to the nearest block
+		
+		let world_block_count = (target_world_size as u32 + TRANSFER_BLOCK_SIZE - 1) / TRANSFER_BLOCK_SIZE;
+		let aux_block_count = (world_desc.aux_data.len() as u32 + TRANSFER_BLOCK_SIZE - 1) / TRANSFER_BLOCK_SIZE;
+		
+		let world_aligned_length = (world_block_count * TRANSFER_BLOCK_SIZE) as usize;
+		let aux_aligned_length = (aux_block_count * TRANSFER_BLOCK_SIZE) as usize;
+		
+		output.resize(world_aligned_length - target_world_size + output.len(), 0);
+		
+		// Append the auxiliary data and align it to the nearest block
+		output.put_slice(&world_desc.aux_data);
+		output.resize(aux_aligned_length - world_desc.aux_data.len() + output.len(), 0);
+		
+		// Verify that the final data is properly aligned to the nearest block
+		assert_eq!((current_size + output.len()) % TRANSFER_BLOCK_SIZE as usize, 0);
+		
+		Ok(output.freeze())
 	}
 }
 
@@ -198,7 +212,7 @@ pub fn encode_factorio_file<'a>(file: &'a FactorioFile<'a>) -> Cow<[u8]> {
 			let data = miniz_oxide::deflate::compress_to_vec_zlib(&file.data, RECONSTRUCT_DEFLATE_LEVEL);
 			
 			Cow::Owned(data)
-		},
+		}
 	}
 }
 

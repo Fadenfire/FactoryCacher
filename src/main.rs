@@ -21,7 +21,7 @@ mod protocol;
 mod zip_writer;
 mod dedup;
 mod chunk_cache;
-mod crc_rev;
+mod rev_crc;
 
 #[derive(FromArgs)]
 /// Factorio cacher

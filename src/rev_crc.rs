@@ -6,12 +6,15 @@ pub struct RevCRC {
 }
 
 impl RevCRC {
-	pub fn new(crc: &Crc<u32, Table<1>>) -> Self {
+	pub const fn new(crc: &Crc<u32, Table<1>>) -> Self {
 		let table = &crc.table()[0];
 		let mut reverse_table = [0; 256];
 		
-		for (n, value) in table.iter().enumerate() {
-			reverse_table[(value >> 24) as usize] = (value << 8) ^ n as u32;
+		let mut n = 0;
+		
+		while n < table.len() {
+			reverse_table[(table[n] >> 24) as usize] = (table[n] << 8) ^ n as u32;
+			n += 1;
 		}
 		
 		Self {

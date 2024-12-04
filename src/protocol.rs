@@ -6,6 +6,7 @@ use quinn_proto::VarInt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use crate::factorio_protocol::FactorioWorldMetadata;
 
 pub const UDP_PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -92,6 +93,8 @@ pub async fn read_message<R: AsyncRead + Unpin>(io: &mut R, buffer: &mut BytesMu
 #[derive(Deserialize, Serialize)]
 pub struct WorldReadyMessage {
 	pub world: FactorioWorldDescription,
+	pub old_info: FactorioWorldMetadata,
+	pub new_info: FactorioWorldMetadata,
 }
 
 #[derive(Deserialize, Serialize)]

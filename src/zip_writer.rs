@@ -17,6 +17,9 @@ struct ZipEntryMetadata {
 }
 
 impl ZipWriter {
+	pub const CENTRAL_DIRECTORY_ENTRY_SIZE: usize = 46;
+	pub const END_OF_CENTRAL_DIRECTORY_SIZE: usize = 22;
+	
 	pub fn new() -> Self {
 		Self {
 			current_offset: 0,
@@ -56,6 +59,10 @@ impl ZipWriter {
 		self.current_offset += file_data.len();
 		
 		buf.freeze()
+	}
+	
+	pub fn advance_offset(&mut self, offset: usize) {
+		self.current_offset += offset;
 	}
 	
 	pub fn encode_central_directory(&self) -> Bytes {
@@ -99,5 +106,19 @@ impl ZipWriter {
 		buf.put_u16_le(0); // Comment length
 		
 		buf.freeze()
+	}
+	
+	pub fn central_directory_size(&self) -> usize {
+		let mut size = 0;
+		
+		for entry in &self.entries {
+			size += Self::CENTRAL_DIRECTORY_ENTRY_SIZE + entry.file_name.len();
+		}
+		
+		size + Self::END_OF_CENTRAL_DIRECTORY_SIZE
+	}
+	
+	pub fn current_size(&self) -> usize {
+		self.current_offset
 	}
 }

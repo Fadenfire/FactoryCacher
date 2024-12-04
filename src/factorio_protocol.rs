@@ -1,9 +1,12 @@
+use crate::rev_crc::RevCRC;
 use crate::utils::{BufExt, UnexpectedEOF};
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crc::Crc;
+use serde::{Deserialize, Serialize};
 
 pub const FACTORIO_CRC: Crc<u32> = Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
+pub const FACTORIO_REV_CRC: RevCRC = RevCRC::new(&FACTORIO_CRC);
 
 pub const TRANSFER_BLOCK_SIZE: u32 = 503;
 
@@ -161,7 +164,7 @@ impl ServerToClientHeartbeatPacket {
 		})
 	}
 	
-	pub fn try_decode_map_ready(mut self) -> Result<Option<MapReadyForDownloadData>, UnexpectedEOF> {
+	pub fn try_decode_map_ready(mut self) -> Result<Option<FactorioWorldMetadata>, UnexpectedEOF> {
 		if self.flags == HeartbeatFlags::HasSynchronizerActions {
 			let action_count = self.data.try_get_factorio_varint32()?;
 			
@@ -169,7 +172,7 @@ impl ServerToClientHeartbeatPacket {
 				let action_type = self.data.try_get_u8()?;
 				
 				if action_type == Self::MAP_READY_FOR_DOWNLOAD_ACTION_ID {
-					return Ok(Some(MapReadyForDownloadData::decode(&mut self.data)?));
+					return Ok(Some(FactorioWorldMetadata::decode(&mut self.data)?));
 				}
 			}
 		}
@@ -178,8 +181,8 @@ impl ServerToClientHeartbeatPacket {
 	}
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct MapReadyForDownloadData {
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+pub struct FactorioWorldMetadata {
 	pub world_size: u32,
 	pub no_idea1: u32,
 	pub aux_size: u32,
@@ -187,7 +190,7 @@ pub struct MapReadyForDownloadData {
 	pub world_crc: u32,
 }
 
-impl MapReadyForDownloadData {
+impl FactorioWorldMetadata {
 	pub fn decode(mut data: impl Buf) -> Result<Self, UnexpectedEOF> {
 		Ok(Self {
 			world_size: data.try_get_u32_le()?,
