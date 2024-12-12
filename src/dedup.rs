@@ -205,7 +205,7 @@ pub fn decode_factorio_file<'a>(file_name: &str, file_data: &'a [u8]) -> anyhow:
 	}
 }
 
-pub fn encode_factorio_file<'a>(file: &'a FactorioFile<'a>) -> Cow<[u8]> {
+pub fn encode_factorio_file<'a>(file: &'a FactorioFile<'a>) -> Cow<'a, [u8]> {
 	match file.file_type {
 		FactorioFileType::Normal => Cow::Borrowed(&file.data),
 		FactorioFileType::Zlib => {

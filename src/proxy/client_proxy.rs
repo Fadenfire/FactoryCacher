@@ -185,16 +185,16 @@ impl ClientProxyState {
 	pub fn on_packet_from_client(&mut self, packet_data: Bytes, out_packets: &mut Vec<(Bytes, PacketDirection)>) {
 		if let Ok((header, msg_data)) = FactorioPacketHeader::decode(packet_data.clone()) {
 			if header.packet_type == PacketType::TransferBlockRequest {
-				let Ok(request) = TransferBlockRequestPacket::decode(msg_data) else { return; };
-				
-				if let Some(response) = self.try_fulfill_block_request(&request) {
-					out_packets.push((response.encode_full_packet(), PacketDirection::ToClient));
-				} else {
-					self.pending_requests.push(request);
+				if let Ok(request) = TransferBlockRequestPacket::decode(msg_data) {
+					if let Some(response) = self.try_fulfill_block_request(&request) {
+						out_packets.push((response.encode_full_packet(), PacketDirection::ToClient));
+					} else {
+						self.pending_requests.push(request);
+					}
+					
+					self.last_block_request = Instant::now();
+					return;
 				}
-				
-				self.last_block_request = Instant::now();
-				return;
 			}
 		}
 		

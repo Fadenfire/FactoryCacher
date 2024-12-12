@@ -217,6 +217,8 @@ impl ServerProxyState {
 					}
 					
 					Self::request_next_blocks(state, out_packets);
+					
+					state.last_block_time = Instant::now();
 				}
 			}
 			ServerProxyPhase::Done => {}
@@ -243,7 +245,7 @@ impl ServerProxyState {
 	) {
 		info!("Got world info: {:?}", world_info);
 		
-		let estimated_reconstructed_world_size = world_info.world_size + world_info.world_size / 10;
+		let estimated_reconstructed_world_size = world_info.world_size * 2;
 		
 		info!("Estimated reconstructed world size: {}", estimated_reconstructed_world_size);
 		

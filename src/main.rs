@@ -41,7 +41,7 @@ enum Subcommand {
 /// Run the client
 #[argh(subcommand, name = "client")]
 struct ClientArgs {
-	#[argh(option, short = 'p', default = "7000")]
+	#[argh(option, short = 'p', default = "60120")]
 	/// port to listen on
 	port: u16,
 	
