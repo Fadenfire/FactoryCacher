@@ -37,6 +37,8 @@ pub async fn run_server_proxy(
                 let (send_stream, mut recv_stream) = result?;
                 let peer_id: VarInt = recv_stream.read_u32_le().await?.into();
 
+				info!("New peer with id {}", peer_id);
+				
                 let localhost: IpAddr = if factorio_addr.is_ipv6() {
                     Ipv6Addr::LOCALHOST.into()
                 } else {
@@ -114,7 +116,9 @@ async fn proxy_server(mut args: ProxyServerArgs) {
 					}
 				}
 				PacketDirection::ToServer => {
-					if args.socket.send_to(&packet_data, args.factorio_addr).await.is_err() {
+					if let Err(err) = args.socket.send_to(&packet_data, args.factorio_addr).await {
+						error!("Failed to send packet to factorio server: {:?}", err);
+						
 						return;
 					}
 				}

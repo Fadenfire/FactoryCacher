@@ -143,10 +143,15 @@ async fn run_client(endpoint: &Endpoint, server_address: SocketAddr, args: &Clie
 	if cache_path.exists() {
 		info!("Loading cache from {}", cache_path.display());
 		
+		let compressed_size = tokio::fs::metadata(&cache_path).await?.len();
 		chunk_cache = Arc::new(ChunkCache::load_from_file(args.cache_limit, cache_path.clone()).await?);
 		
-		info!("Loaded {} chunks ({}B) from the cache",
-			chunk_cache.len(), utils::abbreviate_number(chunk_cache.total_size()));
+		info!(
+			"Loaded {} chunks ({}B, {}B compressed) from the cache",
+			chunk_cache.len(),
+			utils::abbreviate_number(chunk_cache.total_size()),
+			utils::abbreviate_number(compressed_size)
+		);
 	} else {
 		chunk_cache = Arc::new(ChunkCache::new(args.cache_limit));
 	}
@@ -154,6 +159,8 @@ async fn run_client(endpoint: &Endpoint, server_address: SocketAddr, args: &Clie
 	info!("The cache has a limit of {}B", utils::abbreviate_number(args.cache_limit));
 	
 	chunk_cache.start_writer(cache_path, Duration::from_secs(args.cache_save_interval));
+	
+	info!("Listening on {}", listen_address);
 	
 	client_proxy::run_client_proxy(socket.clone(), quic_connection.clone(), chunk_cache.clone()).await?;
 	

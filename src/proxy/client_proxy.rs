@@ -9,6 +9,7 @@ use bytes::{Bytes, BytesMut};
 use log::{debug, error, info};
 use quinn_proto::VarInt;
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::mem;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -45,6 +46,8 @@ pub async fn run_client_proxy(
 					None => {
 						let peer_id: VarInt = next_peer_id.into();
 						next_peer_id = next_peer_id.checked_add(1).ok_or_else(|| anyhow!("Ran out of peer ids"))?;
+						
+						info!("New peer from {} with id {}", peer_addr, peer_id);
 						
 						let (server_receive_queue_tx, server_receive_queue_rx) = mpsc::channel(UDP_QUEUE_SIZE);
 						let (client_receive_queue_tx, client_receive_queue_rx) = mpsc::channel(UDP_QUEUE_SIZE);
@@ -244,7 +247,15 @@ async fn transfer_world_data(
 ) -> anyhow::Result<()> {
 	let mut buf = BytesMut::new();
 	
-	let world_ready_message_data = protocol::read_message(&mut recv_stream, &mut buf).await?;
+	let world_ready_message_data = match protocol::read_message(&mut recv_stream, &mut buf).await {
+		Ok(msg_data) => msg_data,
+		Err(err) if err.downcast_ref::<std::io::Error>().is_some_and(|err| err.kind() == ErrorKind::UnexpectedEof) => {
+			info!("Peer shutdown without ever sending world data");
+			
+			return Ok(());
+		}
+		Err(err) => return Err(err.into()),
+	};
 	
 	let mut total_transferred = 0;
 	let start_time = Instant::now();
