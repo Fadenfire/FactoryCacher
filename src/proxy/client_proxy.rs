@@ -8,7 +8,7 @@ use anyhow::anyhow;
 use bytes::{Bytes, BytesMut};
 use log::{debug, error, info};
 use quinn_proto::VarInt;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::ErrorKind;
 use std::mem;
 use std::net::SocketAddr;
@@ -20,7 +20,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-const WORLD_DATA_TIMEOUT: Duration = Duration::from_secs(30);
+const WORLD_DATA_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub async fn run_client_proxy(
 	socket: Arc<UdpSocket>,
@@ -139,12 +139,11 @@ async fn proxy_client(mut args: ProxyClientArgs) {
 				out_packets.push((packet_data, PacketDirection::ToClient));
 			}
 			result = world_data_receiver.recv(), if !world_data_done => {
-				let Some(new_data) = result else {
+				if result.is_none() {
 					world_data_done = true;
-					continue;
-				};
+				}
 				
-				proxy_state.on_new_world_data(new_data, &mut out_packets);
+				proxy_state.on_new_world_data(result, &mut out_packets);
 			}
 			_ = tokio::time::sleep(UDP_PEER_IDLE_TIMEOUT) => return
 		}
@@ -171,8 +170,9 @@ async fn proxy_client(mut args: ProxyClientArgs) {
 struct ClientProxyState {
 	world_data: Vec<u8>,
 	last_block_request: Instant,
-	pending_requests: Vec<TransferBlockRequestPacket>,
-	pending_requests_swap: Vec<TransferBlockRequestPacket>,
+	pending_requests: BTreeSet<u32>,
+	pending_requests_swap: BTreeSet<u32>,
+	world_data_done: bool,
 }
 
 impl ClientProxyState {
@@ -180,8 +180,9 @@ impl ClientProxyState {
 		Self {
 			world_data: Vec::new(),
 			last_block_request: Instant::now(),
-			pending_requests: Vec::new(),
-			pending_requests_swap: Vec::new(),
+			pending_requests: BTreeSet::new(),
+			pending_requests_swap: BTreeSet::new(),
+			world_data_done: false,
 		}
 	}
 	
@@ -189,10 +190,10 @@ impl ClientProxyState {
 		if let Ok((header, msg_data)) = FactorioPacketHeader::decode(packet_data.clone()) {
 			if header.packet_type == PacketType::TransferBlockRequest {
 				if let Ok(request) = TransferBlockRequestPacket::decode(msg_data) {
-					if let Some(response) = self.try_fulfill_block_request(&request) {
+					if let Some(response) = self.try_fulfill_block_request(request.block_id) {
 						out_packets.push((response.encode_full_packet(), PacketDirection::ToClient));
 					} else {
-						self.pending_requests.push(request);
+						self.pending_requests.insert(request.block_id);
 					}
 					
 					self.last_block_request = Instant::now();
@@ -201,7 +202,7 @@ impl ClientProxyState {
 			}
 		}
 		
-		if !self.world_data.is_empty() && self.last_block_request.elapsed() > WORLD_DATA_TIMEOUT {
+		if !self.world_data.is_empty() && self.world_data_done && self.last_block_request.elapsed() > WORLD_DATA_TIMEOUT {
 			info!("Cleaning up local copy of world data");
 			
 			self.world_data = Vec::new();
@@ -210,27 +211,36 @@ impl ClientProxyState {
 		out_packets.push((packet_data, PacketDirection::ToServer));
 	}
 	
-	pub fn on_new_world_data(&mut self, new_data: Bytes, out_packets: &mut Vec<(Bytes, PacketDirection)>) {
+	pub fn on_new_world_data(&mut self, new_data: Option<Bytes>, out_packets: &mut Vec<(Bytes, PacketDirection)>) {
+		let Some(new_data) = new_data else {
+			self.world_data_done = true;
+			self.last_block_request = Instant::now();
+			
+			return;
+		};
+		
 		self.world_data.extend_from_slice(&new_data);
 		
-		while let Some(request) = self.pending_requests.pop() {
-			if let Some(response) = self.try_fulfill_block_request(&request) {
+		for &requested_block_id in &self.pending_requests {
+			if let Some(response) = self.try_fulfill_block_request(requested_block_id) {
 				out_packets.push((response.encode_full_packet(), PacketDirection::ToClient));
 			} else {
-				self.pending_requests_swap.push(request);
+				self.pending_requests_swap.insert(requested_block_id);
 			}
 		}
+		
+		self.pending_requests.clear();
 		
 		self.last_block_request = Instant::now();
 		mem::swap(&mut self.pending_requests, &mut self.pending_requests_swap);
 	}
 	
-	fn try_fulfill_block_request(&self, request: &TransferBlockRequestPacket) -> Option<TransferBlockPacket> {
-		let offset = request.block_id as usize * TRANSFER_BLOCK_SIZE as usize;
+	fn try_fulfill_block_request(&self, requested_block_id: u32) -> Option<TransferBlockPacket> {
+		let offset = requested_block_id as usize * TRANSFER_BLOCK_SIZE as usize;
 		
 		if offset + TRANSFER_BLOCK_SIZE as usize <= self.world_data.len() {
 			Some(TransferBlockPacket {
-				block_id: request.block_id,
+				block_id: requested_block_id,
 				data: self.world_data[offset..offset + TRANSFER_BLOCK_SIZE as usize].to_vec().into(),
 			})
 		} else {
