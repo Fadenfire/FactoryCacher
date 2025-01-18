@@ -104,12 +104,22 @@ impl ChunkCache {
 		Ok(())
 	}
 	
+	/// Gets all requested chunks, or builds a batch to be fetched.
+	/// 
+	/// All requested chunks currently in the cache will be placed into chunk_out.
+	/// Any remaining chunks that aren't currently being fetched by another task will be bundled into a batch
+	///  of at most batch_size chunks and returned. The caller can then fetch these and insert them into the cache by
+	///  using the BatchChunkRequest's fulfill function.
+	/// Finally, if all requested chunks are being fetched by other tasks, then wait for those tasks to complete and
+	///  place the final chunks into chunk_out.
+	/// 
+	/// Returns None when all requests have been fulfilled.
 	pub async fn get_chunks_batched(&self,
 		chunks_requested: &mut Vec<ChunkKey>,
 		chunk_out: &mut HashMap<ChunkKey, Bytes>,
 		batch_size: usize,
 	) -> Option<BatchChunkRequest> {
-		let waitables = {
+		let pending_requests = {
 			let mut inner = self.inner.lock().unwrap();
 			
 			let mut batch_set = HashSet::with_capacity(batch_size);
@@ -118,6 +128,7 @@ impl ChunkCache {
 			chunks_requested.retain(|&key| {
 				let mut retain = true;
 				
+				// If the requested chunk is already in the cache, remove it from requested and output it.
 				if let Some(chunk) = inner.raw_cache.get(&key) {
 					chunk_out.insert(key, chunk.clone());
 					
@@ -126,6 +137,8 @@ impl ChunkCache {
 					batch.len() < batch_size &&
 					!batch_set.contains(&key)
 				{
+					// If the requested chunk is not in the cache, and it's not currently being requested, then add it to
+					//  the batch and remove it from requested.
 					batch.push(key);
 					batch_set.insert(key);
 					
@@ -135,6 +148,8 @@ impl ChunkCache {
 				retain
 			});
 			
+			// If we built a batch, then mark all chunks in the batch as pending and return the chunk keys to be
+			//  fetched.
 			if !batch.is_empty() {
 				let event = Arc::new(Semaphore::new(0));
 				
@@ -149,43 +164,41 @@ impl ChunkCache {
 				});
 			}
 			
-			let mut waitables = Vec::new();
+			// Otherwise, collect all chunks currently being fetched by somebody else and wait for them to finish.
+			
+			let mut pending_requests = Vec::new();
 			
 			chunks_requested.retain(|&key| {
 				let mut retain = true;
 				
 				if let Some(event) = inner.pending_chunks.get(&key) {
-					waitables.push(event.clone());
+					pending_requests.push((key, event.clone()));
 					retain = false;
 				}
 				
 				retain
 			});
 			
-			if waitables.is_empty() {
+			if pending_requests.is_empty() {
 				return None;
 			}
 			
-			waitables
+			pending_requests
 		};
 		
-		for event in &waitables {
+		for (_key, event) in &pending_requests {
 			let _ = event.acquire().await;
 		}
 		
 		{
 			let inner = self.inner.lock().unwrap();
 			
-			chunks_requested.retain(|&key| {
-				let mut retain = true;
+			for (key, _event) in pending_requests {
+				let chunk = inner.raw_cache.get(&key)
+					.expect("waited on chunk, but chunk was not put in cache");
 				
-				if let Some(chunk) = inner.raw_cache.get(&key) {
-					chunk_out.insert(key, chunk.clone());
-					retain = false;
-				}
-				
-				retain
-			});
+				chunk_out.insert(key, chunk.clone());
+			}
 		}
 		
 		None

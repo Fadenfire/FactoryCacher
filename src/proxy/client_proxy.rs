@@ -325,6 +325,12 @@ async fn transfer_world_data(
 						let response: SendChunksMessage = protocol::decode_message_async(response_data).await?;
 						
 						for (&key, chunk) in batch.batch_keys().iter().zip(response.chunks.iter()) {
+							let data_hash = blake3::hash(&chunk);
+							
+							if data_hash != key.0 {
+								return Err(anyhow::anyhow!("Chunk hash mismatch for {:?}", key));
+							}
+							
 							local_cache.insert(key, chunk.clone());
 						}
 						
