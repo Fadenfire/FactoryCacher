@@ -294,8 +294,9 @@ async fn transfer_world_data(
 		loop {
 			match world_reconstructor.reconstruct_world_file(file_desc, &mut local_cache, &mut buf) {
 				Ok(data_blocks) => {
-					world_data_sender.send(data_blocks.0).await?;
-					world_data_sender.send(data_blocks.1).await?;
+					for data in data_blocks {
+						world_data_sender.send(data).await?;
+					}
 					
 					break;
 				}

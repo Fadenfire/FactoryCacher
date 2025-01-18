@@ -86,7 +86,7 @@ impl WorldReconstructor {
 		file_desc: &FactorioFileDescription,
 		chunks: &HashMap<ChunkKey, Bytes>,
 		buf: &mut BytesMut,
-	) -> Result<(Bytes, Bytes), NeedsMoreData> {
+	) -> Result<[Bytes; 2], NeedsMoreData> {
 		buf.clear();
 		
 		for &chunk_key in &file_desc.content_chunks {
@@ -108,7 +108,7 @@ impl WorldReconstructor {
 		self.crc_hasher.update(&header);
 		self.crc_hasher.update(&file_data);
 		
-		Ok((header, file_data.into_owned().into()))
+		Ok([header, file_data.into_owned().into()])
 	}
 	
 	pub fn finalize_world_file(mut self,
