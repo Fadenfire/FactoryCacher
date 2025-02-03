@@ -1,8 +1,10 @@
 .idea
 *.iml
+.vscode
 
 .DS_Store
 
 /target
 /certs
 /run
+/build-for-website.sh
