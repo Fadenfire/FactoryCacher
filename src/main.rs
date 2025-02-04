@@ -42,27 +42,27 @@ enum Subcommand {
 #[argh(subcommand, name = "client")]
 struct ClientArgs {
 	#[argh(option, short = 'p', default = "60120")]
-	/// port to listen on
+	/// port that factorio clients use to connect, defaults to 60120
 	port: u16,
 	
 	#[argh(option, short = 'h', default = "IpAddr::V4(Ipv4Addr::UNSPECIFIED)")]
-	/// host to listen on
+	/// host that factorio clients use to connect, defaults to 0.0.0.0
 	host: IpAddr,
 	
-	#[argh(option, short = 's')]
-	/// server address
+	#[argh(positional)]
+	/// factorio-cacher server address in host:port form
 	server_address: String,
 	
 	#[argh(option, short = 'c')]
-	/// location of cache file, defaults to persistent-cache in the CWD
+	/// location of cache file, defaults to 'persistent-cache' in the CWD
 	cache_path: Option<PathBuf>,
 	
 	#[argh(option, default = "500_000_000")]
-	/// max size of the chunk cache
+	/// max size of the chunk cache, defaults to 500MB
 	cache_limit: u64,
 	
 	#[argh(option, default = "60")]
-	/// how often to try to save the cache in seconds
+	/// how often to try to save the cache in seconds, defaults to 60s
 	cache_save_interval: u64,
 }
 
@@ -71,15 +71,15 @@ struct ClientArgs {
 #[argh(subcommand, name = "server")]
 struct ServerArgs {
 	#[argh(option, short = 'p', default = "60130")]
-	/// port to listen on
+	/// port that factorio-cacher clients use to connect, defaults to 60130
 	port: u16,
 	
 	#[argh(option, short = 'h', default = "IpAddr::V4(Ipv4Addr::UNSPECIFIED)")]
-	/// host to listen on
+	/// host that factorio-cacher clients use to connect, defaults to 0.0.0.0
 	host: IpAddr,
 	
 	#[argh(positional)]
-	/// factorio server address
+	/// factorio server address in host:port form
 	factorio_address: String,
 }
 
