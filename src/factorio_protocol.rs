@@ -1,7 +1,7 @@
 use crate::rev_crc::RevCRC;
-use crate::utils::{BufExt, UnexpectedEOF};
+use crate::utils::BufExt;
 use bitflags::bitflags;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
 use crc::Crc;
 use serde::{Deserialize, Serialize};
 
@@ -55,7 +55,7 @@ impl FactorioPacketHeader {
 		}
 	}
 	
-	pub fn decode(mut data: Bytes) -> Result<(Self, Bytes), UnexpectedEOF> {
+	pub fn decode(mut data: Bytes) -> Result<(Self, Bytes), TryGetError> {
 		let flags = data.try_get_u8()?;
 		
 		let packet = Self {
@@ -96,7 +96,7 @@ pub struct TransferBlockRequestPacket {
 }
 
 impl TransferBlockRequestPacket {
-	pub fn decode(mut data: Bytes) -> Result<Self, UnexpectedEOF> {
+	pub fn decode(mut data: Bytes) -> Result<Self, TryGetError> {
 		Ok(Self {
 			block_id: data.try_get_u32_le()?,
 		})
@@ -117,7 +117,7 @@ pub struct TransferBlockPacket {
 }
 
 impl TransferBlockPacket {
-	pub fn decode(mut data: Bytes) -> Result<Self, UnexpectedEOF> {
+	pub fn decode(mut data: Bytes) -> Result<Self, TryGetError> {
 		Ok(Self {
 			block_id: data.try_get_u32_le()?,
 			data,
@@ -154,7 +154,7 @@ pub struct ServerToClientHeartbeatPacket {
 impl ServerToClientHeartbeatPacket {
 	pub const MAP_READY_FOR_DOWNLOAD_ACTION_ID: u8 = 5;
 	
-	pub fn decode(mut data: Bytes) -> Result<Self, UnexpectedEOF> {
+	pub fn decode(mut data: Bytes) -> Result<Self, TryGetError> {
 		let flags = HeartbeatFlags::from_bits_retain(data.try_get_u8()?);
 		data.try_get_u32_le()?; // Seq number
 		
@@ -164,7 +164,7 @@ impl ServerToClientHeartbeatPacket {
 		})
 	}
 	
-	pub fn try_decode_map_ready(mut self) -> Result<Option<FactorioWorldMetadata>, UnexpectedEOF> {
+	pub fn try_decode_map_ready(mut self) -> Result<Option<FactorioWorldMetadata>, TryGetError> {
 		if self.flags == HeartbeatFlags::HasSynchronizerActions {
 			let action_count = self.data.try_get_factorio_varint32()?;
 			
@@ -191,7 +191,7 @@ pub struct FactorioWorldMetadata {
 }
 
 impl FactorioWorldMetadata {
-	pub fn decode(mut data: impl Buf) -> Result<Self, UnexpectedEOF> {
+	pub fn decode(mut data: impl Buf) -> Result<Self, TryGetError> {
 		Ok(Self {
 			world_size: data.try_get_u32_le()?,
 			no_idea1: data.try_get_u32_le()?,

@@ -8,7 +8,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use time::util::local_offset::Soundness;
 use tokio::net::{lookup_host, UdpSocket};
 use tokio::select;
 
@@ -213,8 +212,6 @@ async fn run_server(endpoint: &Endpoint, factorio_address: SocketAddr) -> anyhow
 
 fn setup_logging() {
 	use simplelog::*;
-	
-	unsafe { time::util::local_offset::set_soundness(Soundness::Unsound); }
 	
 	let config = ConfigBuilder::new()
 		.set_time_format_custom(format_description!("[[[hour repr:12]:[minute]:[second] [period]]"))
