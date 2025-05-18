@@ -106,17 +106,17 @@ impl ChunkCache {
 	
 	/// Gets all requested chunks, or builds a batch to be fetched.
 	/// 
-	/// All requested chunks currently in the cache will be placed into chunk_out.
+	/// All requested chunks currently in the cache will be placed into chunks_out.
 	/// Any remaining chunks that aren't currently being fetched by another task will be bundled into a batch
-	///  of at most batch_size chunks and returned. The caller can then fetch these and insert them into the cache by
+	///  of at most batch_size chunks and returned. The caller must then fetch these and insert them into the cache by
 	///  using the BatchChunkRequest's fulfill function.
 	/// Finally, if all requested chunks are being fetched by other tasks, then wait for those tasks to complete and
-	///  place the final chunks into chunk_out.
+	///  place the final chunks into chunks_out.
 	/// 
 	/// Returns None when all requests have been fulfilled.
 	pub async fn get_chunks_batched(&self,
 		chunks_requested: &mut Vec<ChunkKey>,
-		chunk_out: &mut HashMap<ChunkKey, Bytes>,
+		chunks_out: &mut HashMap<ChunkKey, Bytes>,
 		batch_size: usize,
 	) -> Option<BatchChunkRequest> {
 		let pending_requests = {
@@ -130,17 +130,18 @@ impl ChunkCache {
 				
 				// If the requested chunk is already in the cache, remove it from requested and output it.
 				if let Some(chunk) = inner.raw_cache.get(&key) {
-					chunk_out.insert(key, chunk.clone());
+					chunks_out.insert(key, chunk.clone());
 					
 					retain = false;
 				} else if !inner.pending_chunks.contains_key(&key) &&
-					batch.len() < batch_size &&
-					!batch_set.contains(&key)
+					batch.len() < batch_size
 				{
 					// If the requested chunk is not in the cache, and it's not currently being requested, then add it to
 					//  the batch and remove it from requested.
-					batch.push(key);
-					batch_set.insert(key);
+					
+					if batch_set.insert(key) {
+						batch.push(key);
+					}
 					
 					retain = false;
 				}
@@ -168,16 +169,11 @@ impl ChunkCache {
 			
 			let mut pending_requests = Vec::new();
 			
-			chunks_requested.retain(|&key| {
-				let mut retain = true;
+			for key in chunks_requested.drain(..) {
+				let event = inner.pending_chunks.get(&key).expect("Remaining chunk is not pending");
 				
-				if let Some(event) = inner.pending_chunks.get(&key) {
-					pending_requests.push((key, event.clone()));
-					retain = false;
-				}
-				
-				retain
-			});
+				pending_requests.push((key, event.clone()));
+			}
 			
 			if pending_requests.is_empty() {
 				return None;
@@ -195,9 +191,9 @@ impl ChunkCache {
 			
 			for (key, _event) in pending_requests {
 				let chunk = inner.raw_cache.get(&key)
-					.expect("waited on chunk, but chunk was not put in cache");
+					.expect("Waited on chunk, but chunk was not put in cache");
 				
-				chunk_out.insert(key, chunk.clone());
+				chunks_out.insert(key, chunk.clone());
 			}
 		}
 		
