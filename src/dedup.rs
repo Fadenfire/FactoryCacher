@@ -15,6 +15,7 @@ pub const RECONSTRUCT_DEFLATE_LEVEL: u8 = 1;
 pub struct FactorioWorldDescription {
 	pub files: Vec<FactorioFileDescription>,
 	pub aux_data: Bytes,
+	pub total_chunks: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -22,6 +23,11 @@ pub struct FactorioFileDescription {
 	pub file_type: FactorioFileType,
 	pub file_name: String,
 	pub content_size: u64,
+	pub chunk_list_key: ChunkKey,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct FactorioFileChunkList {
 	pub content_chunks: Vec<ChunkKey>,
 }
 
@@ -29,11 +35,6 @@ pub struct FactorioFileDescription {
 pub enum FactorioFileType {
 	Normal,
 	Zlib,
-}
-
-pub struct FactorioFile<'a> {
-	pub file_type: FactorioFileType,
-	pub data: Cow<'a, [u8]>,
 }
 
 pub fn deconstruct_world(
@@ -61,9 +62,41 @@ pub fn deconstruct_world(
 	let world = FactorioWorldDescription {
 		files,
 		aux_data: aux_data.to_vec().into(),
+		total_chunks: chunks.len() as u64,
 	};
 	
 	Ok((world, chunks))
+}
+
+pub fn chunk_file(
+	file_name: &str,
+	file: &FactorioFile,
+	chunks: &mut HashMap<ChunkKey, Bytes>
+) -> anyhow::Result<FactorioFileDescription> {
+	let chunker = Chunker::new(&file.data);
+	
+	let mut content_chunks = Vec::new();
+	
+	for chunk in chunker {
+		let hash = ChunkKey(blake3::hash(chunk));
+		
+		content_chunks.push(hash);
+		chunks.insert(hash, chunk.to_vec().into());
+	}
+	
+	let encoded_chunk_list = rmp_serde::to_vec(&FactorioFileChunkList {
+		content_chunks,
+	})?;
+	
+	let chunk_list_key = ChunkKey(blake3::hash(&encoded_chunk_list));
+	chunks.insert(chunk_list_key, encoded_chunk_list.into());
+	
+	Ok(FactorioFileDescription {
+		file_type: file.file_type,
+		file_name: file_name.to_owned(),
+		content_size: file.data.len() as u64,
+		chunk_list_key,
+	})
 }
 
 pub struct WorldReconstructor {
@@ -84,14 +117,14 @@ impl WorldReconstructor {
 	pub fn reconstruct_world_file(
 		&mut self,
 		file_desc: &FactorioFileDescription,
-		chunks: &HashMap<ChunkKey, Bytes>,
-		buf: &mut BytesMut,
+		file_chunk_list: &FactorioFileChunkList,
+		all_chunks: &HashMap<ChunkKey, Bytes>,
 	) -> Result<[Bytes; 2], NeedsMoreData> {
-		buf.clear();
+		let mut buf = Vec::new();
 		
-		for &chunk_key in &file_desc.content_chunks {
-			if let Some(chunk) = chunks.get(&chunk_key) {
-				buf.put_slice(chunk);
+		for &chunk_key in &file_chunk_list.content_chunks {
+			if let Some(chunk) = all_chunks.get(&chunk_key) {
+				buf.extend_from_slice(chunk);
 			} else {
 				return Err(NeedsMoreData);
 			}
@@ -111,7 +144,7 @@ impl WorldReconstructor {
 		Ok([header, file_data.into_owned().into()])
 	}
 	
-	pub fn finalize_world_file(mut self,
+	pub fn finalize_world(mut self,
 		world_desc: &FactorioWorldDescription,
 		target_world_size: usize,
 		target_crc: u32,
@@ -187,6 +220,11 @@ impl WorldReconstructor {
 	}
 }
 
+pub struct FactorioFile<'a> {
+	pub file_type: FactorioFileType,
+	pub data: Cow<'a, [u8]>,
+}
+
 pub fn decode_factorio_file<'a>(file_name: &str, file_data: &'a [u8]) -> anyhow::Result<FactorioFile<'a>> {
 	let name = file_name.rsplit_once('/').map(|(_, last)| last).unwrap_or(file_name);
 	
@@ -214,26 +252,6 @@ pub fn encode_factorio_file<'a>(file: &'a FactorioFile<'a>) -> Cow<'a, [u8]> {
 			Cow::Owned(data)
 		}
 	}
-}
-
-pub fn chunk_file(file_name: &str, file: &FactorioFile, chunks: &mut HashMap<ChunkKey, Bytes>) -> anyhow::Result<FactorioFileDescription> {
-	let chunker = Chunker::new(&file.data);
-	
-	let mut content_chunks = Vec::new();
-	
-	for chunk in chunker {
-		let hash = ChunkKey(blake3::hash(chunk));
-		
-		content_chunks.push(hash);
-		chunks.insert(hash, chunk.to_vec().into());
-	}
-	
-	Ok(FactorioFileDescription {
-		file_type: file.file_type,
-		file_name: file_name.to_owned(),
-		content_size: file.data.len() as u64,
-		content_chunks,
-	})
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]

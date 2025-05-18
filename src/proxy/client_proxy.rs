@@ -1,5 +1,5 @@
 use crate::chunk_cache::ChunkCache;
-use crate::dedup::WorldReconstructor;
+use crate::dedup::{FactorioFileChunkList, WorldReconstructor};
 use crate::factorio_protocol::{FactorioPacket, FactorioPacketHeader, PacketType, TransferBlockPacket, TransferBlockRequestPacket, TRANSFER_BLOCK_SIZE};
 use crate::protocol::{Datagram, RequestChunksMessage, SendChunksMessage, WorldReadyMessage, UDP_PEER_IDLE_TIMEOUT};
 use crate::proxy::{PacketDirection, UDP_QUEUE_SIZE};
@@ -257,6 +257,8 @@ async fn transfer_world_data(
 ) -> anyhow::Result<()> {
 	let mut buf = BytesMut::new();
 	
+	// Receive world description
+	
 	let world_ready_message_data = match protocol::read_message(&mut recv_stream, &mut buf).await {
 		Ok(msg_data) => msg_data,
 		Err(err) if err.downcast_ref::<std::io::Error>().is_some_and(|err| err.kind() == ErrorKind::UnexpectedEof) => {
@@ -277,22 +279,84 @@ async fn transfer_world_data(
 	let world_ready: WorldReadyMessage = protocol::decode_message_async(world_ready_message_data).await?;
 	let world_desc = world_ready.world;
 	
-	let mut all_chunks = world_desc.files.iter()
+	info!("World description: size: {}, crc: {}, file count: {}, total chunks: {}",
+		world_ready.new_info.world_size, world_ready.new_info.world_crc, world_desc.files.len(), world_desc.total_chunks);
+	
+	// Chunk fetching boilerplate
+	
+	let mut chunks_remaining;
+	let mut local_cache = HashMap::new();
+	
+	let mut fetch_chunk_batch = async |chunks_remaining: &mut _, local_cache: &mut _| {
+		let Some(batch) = chunk_cache.get_chunks_batched(chunks_remaining, local_cache, 512).await
+			else { return Ok(()); };
+		
+		let request_data = protocol::encode_message_async(RequestChunksMessage {
+			requested_chunks: batch.batch_keys().to_vec(),
+		}).await?;
+		
+		protocol::write_message(&mut send_stream, request_data).await?;
+		
+		let response_data = protocol::read_message(&mut recv_stream, &mut buf).await?;
+		total_transferred += response_data.len() as u64;
+		
+		info!("Received batch of {} chunks, size: {}B",
+			batch.batch_keys().len(),
+			utils::abbreviate_number(response_data.len() as u64)
+		);
+		
+		let response: SendChunksMessage = protocol::decode_message_async(response_data).await?;
+		
+		for (&key, chunk) in batch.batch_keys().iter().zip(response.chunks.iter()) {
+			let data_hash = blake3::hash(&chunk);
+			
+			if data_hash != key.0 {
+				return Err(anyhow::anyhow!("Chunk hash mismatch for {:?}", key));
+			}
+			
+			local_cache.insert(key, chunk.clone());
+		}
+		
+		batch.fulfill(&response.chunks);
+		
+		Ok(())
+	};
+	
+	// Fetch file chunk lists
+	
+	chunks_remaining = world_desc.files.iter()
+		.map(|file| file.chunk_list_key)
+		.collect::<Vec<_>>();
+	
+	info!("Loading chunk lists");
+	
+	while !chunks_remaining.is_empty() {
+		fetch_chunk_batch(&mut chunks_remaining, &mut local_cache).await?;
+	}
+	
+	let world_file_chunk_lists = world_desc.files.iter()
+		.map(|file| {
+			let encoded_content_desc = local_cache.get(&file.chunk_list_key)
+				.expect("File content desc key not in local cache after fetching");
+			
+			rmp_serde::from_slice(&encoded_content_desc).map_err(Into::into)
+		})
+		.collect::<anyhow::Result<Vec<FactorioFileChunkList>>>()?;
+	
+	// Reconstruct world, fetching world data chunks along the way
+	
+	chunks_remaining = world_file_chunk_lists.iter()
 		.flat_map(|file| file.content_chunks.iter())
 		.copied()
 		.collect::<Vec<_>>();
 	
-	info!("World description: size: {}, crc: {}, file count: {}, total chunks: {}",
-		world_ready.new_info.world_size, world_ready.new_info.world_crc, world_desc.files.len(), all_chunks.len());
-	
-	let mut local_cache = HashMap::new();
 	let mut world_reconstructor = WorldReconstructor::new();
 	
-	for file_desc in &world_desc.files {
+	for (file_desc, file_chunk_list) in world_desc.files.iter().zip(&world_file_chunk_lists) {
 		debug!("Reconstructing file {}", &file_desc.file_name);
 		
 		loop {
-			match world_reconstructor.reconstruct_world_file(file_desc, &mut local_cache, &mut buf) {
+			match world_reconstructor.reconstruct_world_file(file_desc, file_chunk_list, &mut local_cache) {
 				Ok(data_blocks) => {
 					for data in data_blocks {
 						world_data_sender.send(data).await?;
@@ -301,41 +365,11 @@ async fn transfer_world_data(
 					break;
 				}
 				Err(_) => {
-					if all_chunks.is_empty() {
+					if chunks_remaining.is_empty() {
 						panic!("Emptied chunk list but reconstructor wants more data");
 					}
 					
-					if let Some(batch) =
-						chunk_cache.get_chunks_batched(&mut all_chunks, &mut local_cache, 512).await
-					{
-						let request_data = protocol::encode_message_async(RequestChunksMessage {
-							requested_chunks: batch.batch_keys().to_vec(),
-						}).await?;
-						
-						protocol::write_message(&mut send_stream, request_data).await?;
-						
-						let response_data = protocol::read_message(&mut recv_stream, &mut buf).await?;
-						total_transferred += response_data.len() as u64;
-						
-						info!("Received batch of {} chunks, size: {}B",
-							batch.batch_keys().len(),
-							utils::abbreviate_number(response_data.len() as u64)
-						);
-						
-						let response: SendChunksMessage = protocol::decode_message_async(response_data).await?;
-						
-						for (&key, chunk) in batch.batch_keys().iter().zip(response.chunks.iter()) {
-							let data_hash = blake3::hash(&chunk);
-							
-							if data_hash != key.0 {
-								return Err(anyhow::anyhow!("Chunk hash mismatch for {:?}", key));
-							}
-							
-							local_cache.insert(key, chunk.clone());
-						}
-						
-						batch.fulfill(&response.chunks);
-					}
+					fetch_chunk_batch(&mut chunks_remaining, &mut local_cache).await?;
 				}
 			}
 		}
@@ -354,7 +388,7 @@ async fn transfer_world_data(
 	
 	info!("Reconstructing final data");
 	
-	let last_data = world_reconstructor.finalize_world_file(
+	let last_data = world_reconstructor.finalize_world(
 		&world_desc, world_ready.new_info.world_size as usize, world_ready.new_info.world_crc)?;
 	
 	world_data_sender.send(last_data).await?;
