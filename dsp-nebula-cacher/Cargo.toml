@@ -1,5 +1,5 @@
 [package]
-name = "factorio-cacher"
+name = "dsp-nebula-cacher"
 version = "0.1.0"
 edition = "2024"
 
@@ -17,8 +17,8 @@ log.workspace = true
 
 common = { path = "../common" }
 
-zip = { version = "3.0", default-features = false, features = ["deflate", "zstd"] }
-miniz_oxide = { version = "0.8.0", features = ["std"] }
-bitflags = "2.0"
-crc = "3.0"
-memchr = "2.0"
+fastwebsockets = { version = "0.10", features = ["upgrade", "unstable-split"] }
+hyper = { version = "1.0", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+lz4_flex = "0.11"
