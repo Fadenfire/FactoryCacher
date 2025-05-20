@@ -13,8 +13,6 @@ bytes.workspace = true
 blake3.workspace = true
 anyhow.workspace = true
 log.workspace = true
-simplelog.workspace = true
-time.workspace = true
 
 common = { path = "../common" }
 

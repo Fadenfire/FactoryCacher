@@ -166,7 +166,6 @@ name = "common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "argh",
  "blake3",
  "bytes",
  "hashlink",
@@ -256,8 +255,6 @@ dependencies = [
  "quinn-proto",
  "rmp-serde",
  "serde",
- "simplelog",
- "time",
  "tokio",
  "zip",
 ]
