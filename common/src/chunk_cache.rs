@@ -187,7 +187,7 @@ impl ChunkCache {
 		}
 		
 		{
-			let inner = self.inner.lock().unwrap();
+			let mut inner = self.inner.lock().unwrap();
 			
 			for (key, _event) in pending_requests {
 				let chunk = inner.raw_cache.get(&key)
@@ -279,8 +279,8 @@ impl RawChunkCache {
 		}
 	}
 	
-	pub fn get(&self, key: &ChunkKey) -> Option<&Bytes> {
-		self.chunks.get(key)
+	pub fn get(&mut self, key: &ChunkKey) -> Option<&Bytes> {
+		self.chunks.to_back(key).map(|b| &*b)
 	}
 }
 
