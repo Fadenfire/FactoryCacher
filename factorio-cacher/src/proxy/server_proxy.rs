@@ -1,9 +1,10 @@
 use crate::factorio_protocol::{FactorioPacket, FactorioPacketHeader, FactorioWorldMetadata, PacketType, ServerToClientHeartbeatPacket, TransferBlockPacket, TransferBlockRequestPacket, TRANSFER_BLOCK_SIZE};
 use crate::protocol::{Datagram, RequestChunksMessage, SendChunksMessage, WorldReadyMessage, UDP_PEER_IDLE_TIMEOUT};
 use crate::proxy::{PacketDirection, UDP_QUEUE_SIZE};
-use crate::{dedup, protocol, utils};
+use crate::factorio_world;
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
+use common::{protocol_utils, utils};
 use log::{error, info};
 use memchr::memmem::Finder;
 use quinn_proto::VarInt;
@@ -372,7 +373,7 @@ async fn transfer_world_data(
 	let aux_data = received_data.slice(aux_data_offset as usize..(aux_data_offset + downloading_state.world_info.aux_size) as usize);
 	
 	let (world_description, chunks) =
-		tokio::task::spawn_blocking(move || dedup::deconstruct_world(&world_data, &aux_data)).await?
+		tokio::task::spawn_blocking(move || factorio_world::deconstruct_world(&world_data, &aux_data)).await?
 			.context("Deconstruction failed")?;
 	
 	info!("Deconstructing world took {}ms", start_time.elapsed().as_millis());
@@ -382,7 +383,7 @@ async fn transfer_world_data(
 	let mut total_transferred = 0;
 	let start_time = Instant::now();
 	
-	let world_ready_message = protocol::encode_message_async(WorldReadyMessage {
+	let world_ready_message = protocol_utils::encode_message_async(WorldReadyMessage {
 		world: world_description,
 		old_info: downloading_state.world_info.clone(),
 		new_info: downloading_state.new_world_info.clone(),
@@ -391,12 +392,12 @@ async fn transfer_world_data(
 	total_transferred += world_ready_message.len() as u64;
 	info!("Sending world description, size: {}B", utils::abbreviate_number(world_ready_message.len() as u64));
 	
-	protocol::write_message(&mut send_stream, world_ready_message).await?;
+	protocol_utils::write_message(&mut send_stream, world_ready_message).await?;
 	
 	let mut buf = BytesMut::new();
 	
-	while let Ok(request_data) = protocol::read_message(&mut recv_stream, &mut buf).await {
-		let request: RequestChunksMessage = protocol::decode_message_async(request_data).await?;
+	while let Ok(request_data) = protocol_utils::read_message(&mut recv_stream, &mut buf).await {
+		let request: RequestChunksMessage = protocol_utils::decode_message_async(request_data).await?;
 		
 		let response = SendChunksMessage {
 			chunks: request.requested_chunks.iter()
@@ -404,7 +405,7 @@ async fn transfer_world_data(
 				.collect()
 		};
 		
-		let response_data = protocol::encode_message_async(response).await?;
+		let response_data = protocol_utils::encode_message_async(response).await?;
 		total_transferred += response_data.len() as u64;
 		
 		info!("Sending batch of {} chunks, size: {}B",
@@ -412,7 +413,7 @@ async fn transfer_world_data(
 			utils::abbreviate_number(response_data.len() as u64)
 		);
 		
-		protocol::write_message(&mut send_stream, response_data).await?;
+		protocol_utils::write_message(&mut send_stream, response_data).await?;
 	}
 	
 	let elapsed = start_time.elapsed();

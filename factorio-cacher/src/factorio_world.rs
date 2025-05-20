@@ -1,9 +1,10 @@
-use crate::chunker::Chunker;
 use crate::factorio_protocol::{FACTORIO_CRC, FACTORIO_REV_CRC, TRANSFER_BLOCK_SIZE};
 use crate::rev_crc;
 use crate::zip_writer::ZipWriter;
 use bytes::{BufMut, Bytes, BytesMut};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use common::dedup;
+use common::dedup::ChunkKey;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -73,16 +74,7 @@ pub fn chunk_file(
 	file: &FactorioFile,
 	chunks: &mut HashMap<ChunkKey, Bytes>
 ) -> anyhow::Result<FactorioFileDescription> {
-	let chunker = Chunker::new(&file.data);
-	
-	let mut content_chunks = Vec::new();
-	
-	for chunk in chunker {
-		let hash = ChunkKey(blake3::hash(chunk));
-		
-		content_chunks.push(hash);
-		chunks.insert(hash, chunk.to_vec().into());
-	}
+	let content_chunks = dedup::chunk_data(&file.data, chunks);
 	
 	let encoded_chunk_list = rmp_serde::to_vec(&FactorioFileChunkList {
 		content_chunks,
@@ -251,26 +243,5 @@ pub fn encode_factorio_file<'a>(file: &'a FactorioFile<'a>) -> Cow<'a, [u8]> {
 			
 			Cow::Owned(data)
 		}
-	}
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ChunkKey(pub blake3::Hash);
-
-impl<'de> Deserialize<'de> for ChunkKey {
-	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-	where D: Deserializer<'de>
-	{
-		let data: [u8; 32] = serde_bytes::deserialize(deserializer)?;
-		
-		Ok(ChunkKey(blake3::Hash::from(data)))
-	}
-}
-
-impl Serialize for ChunkKey {
-	fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-	where S: Serializer
-	{
-		serializer.serialize_bytes(self.0.as_bytes())
 	}
 }

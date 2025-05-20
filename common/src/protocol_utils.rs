@@ -1,43 +1,7 @@
-use std::time::Duration;
-use crate::dedup::{ChunkKey, FactorioWorldDescription};
-use bytes::{BufMut, Bytes, BytesMut};
-use quinn_proto::coding::Codec;
-use quinn_proto::VarInt;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use bytes::{Bytes, BytesMut};
+use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use crate::factorio_protocol::FactorioWorldMetadata;
-
-pub const UDP_PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-
-#[derive(Debug, Eq, PartialEq)]
-pub struct Datagram {
-	pub peer_id: VarInt,
-	pub data: Bytes,
-}
-
-impl Datagram {
-	pub fn new(peer_id: VarInt, data: Bytes) -> Self {
-		Self {
-			peer_id,
-			data,
-		}
-	}
-	
-	pub fn decode(mut data: Bytes) -> anyhow::Result<Self> {
-		let peer_id = VarInt::decode(&mut data)?;
-		
-		Ok(Self {
-			peer_id,
-			data,
-		})
-	}
-	
-	pub fn encode(&self, buffer: &mut BytesMut) {
-		self.peer_id.encode(buffer);
-		buffer.put_slice(&self.data);
-	}
-}
 
 const ZSTD_COMPRESSION_LEVEL: i32 = 11;
 const MESSAGE_SIZE_LIMIT: usize = 20_000_000;
@@ -88,21 +52,4 @@ pub async fn read_message<R: AsyncRead + Unpin>(io: &mut R, buffer: &mut BytesMu
 	io.read_exact(buffer).await?;
 	
 	Ok(buffer.split().freeze())
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct WorldReadyMessage {
-	pub world: FactorioWorldDescription,
-	pub old_info: FactorioWorldMetadata,
-	pub new_info: FactorioWorldMetadata,
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct RequestChunksMessage {
-	pub requested_chunks: Vec<ChunkKey>,
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct SendChunksMessage {
-	pub chunks: Vec<Bytes>,
 }

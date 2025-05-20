@@ -1,3 +1,42 @@
+use std::collections::HashMap;
+use bytes::Bytes;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct ChunkKey(pub blake3::Hash);
+
+pub fn chunk_data(data: &[u8], chunks: &mut HashMap<ChunkKey, Bytes>) -> Vec<ChunkKey> {
+	let chunker = Chunker::new(data);
+	let mut chunks_keys = Vec::new();
+	
+	for chunk in chunker {
+		let hash = ChunkKey(blake3::hash(chunk));
+		
+		chunks_keys.push(hash);
+		chunks.insert(hash, chunk.to_vec().into());
+	}
+	
+	chunks_keys
+}
+
+impl<'de> Deserialize<'de> for ChunkKey {
+	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+	where D: Deserializer<'de>
+	{
+		let data: [u8; 32] = serde_bytes::deserialize(deserializer)?;
+		
+		Ok(ChunkKey(blake3::Hash::from(data)))
+	}
+}
+
+impl Serialize for ChunkKey {
+	fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+	where S: Serializer
+	{
+		serializer.serialize_bytes(self.0.as_bytes())
+	}
+}
+
 #[derive(Debug, Clone)]
 pub struct RabinKarpHash {
 	hash: u32,
@@ -88,3 +127,4 @@ impl<'a> Iterator for Chunker<'a> {
 		Some(chunk)
 	}
 }
+

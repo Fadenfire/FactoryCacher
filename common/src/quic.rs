@@ -1,15 +1,18 @@
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use std::sync::Arc;
 use std::time::Duration;
+use quinn::Endpoint;
 use rustls::pki_types::pem::PemObject;
+use tokio::net::lookup_host;
 
 pub const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const QUIC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 
-const ROOT_CERT_DATA: &[u8] = include_bytes!("../certs/root-ca.pem");
+const ROOT_CERT_DATA: &[u8] = include_bytes!("../../certs/root-ca.pem");
 
-const END_CERT_DATA: &[u8] = include_bytes!("../certs/cert.pem");
-const END_PRIVATE_KEY_DATA: &[u8] = include_bytes!("../certs/cert.key.pem");
+const END_CERT_DATA: &[u8] = include_bytes!("../../certs/cert.pem");
+const END_PRIVATE_KEY_DATA: &[u8] = include_bytes!("../../certs/cert.key.pem");
 
 pub fn make_client_config() -> quinn::ClientConfig {
 	let mut certs = rustls::RootCertStore::empty();
@@ -38,4 +41,22 @@ pub fn make_server_config() -> quinn::ServerConfig {
 	server_config.transport_config(Arc::new(transport_config));
 	
 	server_config
+}
+
+pub async fn create_client_endpoint(server_address: &str) -> (Endpoint, SocketAddr) {
+	let server_address = lookup_host(server_address).await
+		.expect("Error looking up host")
+		.next()
+		.expect("No server address found");
+	
+	let local_address = SocketAddr::new(if server_address.is_ipv6() {
+		Ipv6Addr::UNSPECIFIED.into()
+	} else {
+		Ipv4Addr::UNSPECIFIED.into()
+	}, 0);
+	
+	let mut endpoint = Endpoint::client(local_address).unwrap();
+	endpoint.set_default_client_config(make_client_config());
+	
+	(endpoint, server_address)
 }

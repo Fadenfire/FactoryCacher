@@ -1,9 +1,8 @@
-use crate::chunk_cache::ChunkCache;
-use crate::dedup::{FactorioFileChunkList, WorldReconstructor};
+use common::chunk_cache::ChunkCache;
+use crate::factorio_world::{FactorioFileChunkList, WorldReconstructor};
 use crate::factorio_protocol::{FactorioPacket, FactorioPacketHeader, PacketType, TransferBlockPacket, TransferBlockRequestPacket, TRANSFER_BLOCK_SIZE};
 use crate::protocol::{Datagram, RequestChunksMessage, SendChunksMessage, WorldReadyMessage, UDP_PEER_IDLE_TIMEOUT};
 use crate::proxy::{PacketDirection, UDP_QUEUE_SIZE};
-use crate::{protocol, utils};
 use anyhow::anyhow;
 use bytes::{Bytes, BytesMut};
 use log::{debug, error, info};
@@ -19,6 +18,7 @@ use tokio::net::UdpSocket;
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
+use common::{protocol_utils, utils};
 
 const WORLD_DATA_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -259,7 +259,7 @@ async fn transfer_world_data(
 	
 	// Receive world description
 	
-	let world_ready_message_data = match protocol::read_message(&mut recv_stream, &mut buf).await {
+	let world_ready_message_data = match protocol_utils::read_message(&mut recv_stream, &mut buf).await {
 		Ok(msg_data) => msg_data,
 		Err(err) if err.downcast_ref::<std::io::Error>().is_some_and(|err| err.kind() == ErrorKind::UnexpectedEof) => {
 			info!("Peer shutdown without ever sending world data");
@@ -276,7 +276,7 @@ async fn transfer_world_data(
 	
 	info!("Received world description, size: {}B", utils::abbreviate_number(world_ready_message_data.len() as u64));
 	
-	let world_ready: WorldReadyMessage = protocol::decode_message_async(world_ready_message_data).await?;
+	let world_ready: WorldReadyMessage = protocol_utils::decode_message_async(world_ready_message_data).await?;
 	let world_desc = world_ready.world;
 	
 	info!("World description: size: {}, crc: {}, file count: {}, total chunks: {}",
@@ -291,13 +291,13 @@ async fn transfer_world_data(
 		let Some(batch) = chunk_cache.get_chunks_batched(chunks_remaining, local_cache, 512).await
 			else { return Ok(()); };
 		
-		let request_data = protocol::encode_message_async(RequestChunksMessage {
+		let request_data = protocol_utils::encode_message_async(RequestChunksMessage {
 			requested_chunks: batch.batch_keys().to_vec(),
 		}).await?;
 		
-		protocol::write_message(&mut send_stream, request_data).await?;
+		protocol_utils::write_message(&mut send_stream, request_data).await?;
 		
-		let response_data = protocol::read_message(&mut recv_stream, &mut buf).await?;
+		let response_data = protocol_utils::read_message(&mut recv_stream, &mut buf).await?;
 		total_transferred += response_data.len() as u64;
 		
 		info!("Received batch of {} chunks, size: {}B",
@@ -305,7 +305,7 @@ async fn transfer_world_data(
 			utils::abbreviate_number(response_data.len() as u64)
 		);
 		
-		let response: SendChunksMessage = protocol::decode_message_async(response_data).await?;
+		let response: SendChunksMessage = protocol_utils::decode_message_async(response_data).await?;
 		
 		for (&key, chunk) in batch.batch_keys().iter().zip(response.chunks.iter()) {
 			let data_hash = blake3::hash(&chunk);

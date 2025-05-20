@@ -1,25 +1,19 @@
-use crate::chunk_cache::ChunkCache;
 use crate::proxy::{client_proxy, server_proxy};
 use anyhow::Context;
 use argh::FromArgs;
+use common::quic;
 use log::{error, info};
 use quinn::Endpoint;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::{lookup_host, UdpSocket};
-use tokio::select;
 
-mod chunker;
 mod factorio_protocol;
-mod utils;
 mod proxy;
-mod quic;
 mod protocol;
 mod zip_writer;
-mod dedup;
-mod chunk_cache;
+mod factorio_world;
 mod rev_crc;
 
 #[derive(FromArgs)]
@@ -86,7 +80,7 @@ struct ServerArgs {
 async fn main() {
 	let args: Args = argh::from_env();
 	
-	setup_logging();
+	common::setup_logging();
 	
 	match args.subcommand {
 		Subcommand::Client(client_args) => subcommand_client(client_args).await,
@@ -95,39 +89,12 @@ async fn main() {
 }
 
 async fn subcommand_client(args: ClientArgs) {
-	let server_address = lookup_host(args.server_address.as_str()).await
-		.expect("Error looking up host")
-		.next()
-		.expect("No server address found");
+	let (endpoint, server_address) = quic::create_client_endpoint(&args.server_address).await;
 	
-	let local_address = SocketAddr::new(if server_address.is_ipv6() {
-		Ipv6Addr::UNSPECIFIED.into()
-	} else {
-		Ipv4Addr::UNSPECIFIED.into()
-	}, 0);
-	
-	let mut endpoint = Endpoint::client(local_address).unwrap();
-	endpoint.set_default_client_config(quic::make_client_config());
-	
-	select! {
-		result = run_client(&endpoint, server_address, &args) => result.unwrap(),
-		_ = tokio::signal::ctrl_c() => {}
-	}
-	
-	endpoint.close(0u32.into(), b"quit");
-	
-	select! {
-		_ = endpoint.wait_idle() => {},
-		_ = tokio::signal::ctrl_c() => {}
-	}
-	
-	info!("Shutdown");
+	common::cli_wrapper(&endpoint, || run_client(&endpoint, server_address, &args)).await;
 }
 
 async fn run_client(endpoint: &Endpoint, server_address: SocketAddr, args: &ClientArgs) -> anyhow::Result<()> {
-	let cache_path = args.cache_path.clone()
-		.unwrap_or_else(|| std::path::absolute("persistent-cache").unwrap());
-	
 	info!("Connecting...");
 	
 	let quic_connection = Arc::new(endpoint.connect(server_address, "localhost")?.await.context("QUIC connecting")?);
@@ -137,27 +104,11 @@ async fn run_client(endpoint: &Endpoint, server_address: SocketAddr, args: &Clie
 	
 	info!("Connected");
 	
-	let chunk_cache;
-	
-	if cache_path.exists() {
-		info!("Loading cache from {}", cache_path.display());
-		
-		let compressed_size = tokio::fs::metadata(&cache_path).await?.len();
-		chunk_cache = Arc::new(ChunkCache::load_from_file(args.cache_limit, cache_path.clone()).await?);
-		
-		info!(
-			"Loaded {} chunks ({}B, {}B compressed) from the cache",
-			chunk_cache.len(),
-			utils::abbreviate_number(chunk_cache.total_size()),
-			utils::abbreviate_number(compressed_size)
-		);
-	} else {
-		chunk_cache = Arc::new(ChunkCache::new(args.cache_limit));
-	}
-	
-	info!("The cache has a limit of {}B", utils::abbreviate_number(args.cache_limit));
-	
-	chunk_cache.start_writer(cache_path, Duration::from_secs(args.cache_save_interval));
+	let chunk_cache = common::create_chunk_cache(
+		&args.cache_path,
+		args.cache_limit,
+		args.cache_save_interval
+	).await?;
 	
 	info!("Listening on {}", listen_address);
 	
@@ -175,19 +126,7 @@ async fn subcommand_server(args: ServerArgs) {
 	let listen_address = SocketAddr::new(args.host, args.port);
 	let endpoint = Endpoint::server(quic::make_server_config(), listen_address).unwrap();
 	
-	select! {
-		result = run_server(&endpoint, factorio_address) => result.unwrap(),
-		_ = tokio::signal::ctrl_c() => {}
-	}
-	
-	endpoint.close(0u32.into(), b"quit");
-	
-	select! {
-		_ = endpoint.wait_idle() => {},
-		_ = tokio::signal::ctrl_c() => {}
-	}
-	
-	info!("Shutdown");
+	common::cli_wrapper(&endpoint, || run_server(&endpoint, factorio_address)).await;
 }
 
 async fn run_server(endpoint: &Endpoint, factorio_address: SocketAddr) -> anyhow::Result<()> {
@@ -210,13 +149,3 @@ async fn run_server(endpoint: &Endpoint, factorio_address: SocketAddr) -> anyhow
 	}
 }
 
-fn setup_logging() {
-	use simplelog::*;
-	
-	let config = ConfigBuilder::new()
-		.set_time_format_custom(format_description!("[[[hour repr:12]:[minute]:[second] [period]]"))
-		.set_time_offset_to_local().unwrap()
-		.build();
-	
-	TermLogger::init(LevelFilter::Info, config, TerminalMode::Stdout, ColorChoice::Auto).expect("Unable to init logger");
-}

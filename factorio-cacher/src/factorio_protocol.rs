@@ -1,5 +1,5 @@
 use crate::rev_crc::RevCRC;
-use crate::utils::BufExt;
+use common::utils::BufExt;
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
 use crc::Crc;

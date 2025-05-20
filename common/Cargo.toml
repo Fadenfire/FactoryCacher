@@ -1,0 +1,21 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+argh.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+rmp-serde.workspace = true
+bytes.workspace = true
+zstd.workspace = true
+blake3.workspace = true
+anyhow.workspace = true
+log.workspace = true
+simplelog.workspace = true
+time.workspace = true
+hashlink.workspace = true
