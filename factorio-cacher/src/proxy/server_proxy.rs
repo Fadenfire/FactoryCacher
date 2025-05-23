@@ -1,5 +1,5 @@
 use crate::factorio_protocol::{FactorioPacket, FactorioPacketHeader, FactorioWorldMetadata, PacketType, ServerToClientHeartbeatPacket, TransferBlockPacket, TransferBlockRequestPacket, TRANSFER_BLOCK_SIZE};
-use crate::protocol::{Datagram, RequestChunksMessage, SendChunksMessage, WorldReadyMessage, UDP_PEER_IDLE_TIMEOUT};
+use crate::protocol::{Datagram, WorldReadyMessage, UDP_PEER_IDLE_TIMEOUT};
 use crate::proxy::{PacketDirection, UDP_QUEUE_SIZE};
 use crate::factorio_world;
 use anyhow::Context;
@@ -18,6 +18,7 @@ use tokio::net::UdpSocket;
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
+use common::protocol_utils::{RequestChunksMessage, SendChunksMessage};
 
 pub async fn run_server_proxy(
 	connection: Arc<quinn::Connection>,
@@ -389,38 +390,22 @@ async fn transfer_world_data(
 		new_info: downloading_state.new_world_info.clone(),
 	}).await?;
 	
-	total_transferred += world_ready_message.len() as u64;
+	total_transferred += world_ready_message.len();
 	info!("Sending world description, size: {}B", utils::abbreviate_number(world_ready_message.len() as u64));
 	
 	protocol_utils::write_message(&mut send_stream, world_ready_message).await?;
 	
-	let mut buf = BytesMut::new();
-	
-	while let Ok(request_data) = protocol_utils::read_message(&mut recv_stream, &mut buf).await {
-		let request: RequestChunksMessage = protocol_utils::decode_message_async(request_data).await?;
-		
-		let response = SendChunksMessage {
-			chunks: request.requested_chunks.iter()
-				.map(|&key| chunks.get(&key).expect("Client requested chunk that we don't have").clone())
-				.collect()
-		};
-		
-		let response_data = protocol_utils::encode_message_async(response).await?;
-		total_transferred += response_data.len() as u64;
-		
-		info!("Sending batch of {} chunks, size: {}B",
-			request.requested_chunks.len(),
-			utils::abbreviate_number(response_data.len() as u64)
-		);
-		
-		protocol_utils::write_message(&mut send_stream, response_data).await?;
-	}
+	total_transferred += protocol_utils::provide_chunks_as_requested(
+		&mut send_stream,
+		&mut recv_stream,
+		&chunks
+	).await?;
 	
 	let elapsed = start_time.elapsed();
 	
 	info!("Finished sending world in {}s, total transferred: {}B, original size: {}B, dedup ratio: {:.2}%, avg rate: {}B/s",
 		elapsed.as_secs(),
-		utils::abbreviate_number(total_transferred),
+		utils::abbreviate_number(total_transferred as u64),
 		utils::abbreviate_number(original_world_size),
 		(total_transferred as f64 / original_world_size as f64) * 100.0,
 		utils::abbreviate_number((total_transferred as f64 / elapsed.as_millis() as f64 * 1000.0) as u64),

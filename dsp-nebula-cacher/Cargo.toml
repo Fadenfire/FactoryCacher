@@ -6,14 +6,12 @@ edition = "2024"
 [dependencies]
 tokio.workspace = true
 quinn.workspace = true
-quinn-proto.workspace = true
 argh.workspace = true
 serde.workspace = true
-rmp-serde.workspace = true
 bytes.workspace = true
-blake3.workspace = true
 anyhow.workspace = true
 log.workspace = true
+hex-literal.workspace = true
 
 common = { path = "../common" }
 

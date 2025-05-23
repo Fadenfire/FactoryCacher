@@ -1,7 +1,7 @@
 use common::chunk_cache::ChunkCache;
 use crate::factorio_world::{FactorioFileChunkList, WorldReconstructor};
 use crate::factorio_protocol::{FactorioPacket, FactorioPacketHeader, PacketType, TransferBlockPacket, TransferBlockRequestPacket, TRANSFER_BLOCK_SIZE};
-use crate::protocol::{Datagram, RequestChunksMessage, SendChunksMessage, WorldReadyMessage, UDP_PEER_IDLE_TIMEOUT};
+use crate::protocol::{Datagram, WorldReadyMessage, UDP_PEER_IDLE_TIMEOUT};
 use crate::proxy::{PacketDirection, UDP_QUEUE_SIZE};
 use anyhow::anyhow;
 use bytes::{Bytes, BytesMut};
@@ -19,6 +19,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use common::{protocol_utils, utils};
+use common::protocol_utils::{ChunkBatchFetcher, RequestChunksMessage, SendChunksMessage};
 
 const WORLD_DATA_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -255,6 +256,9 @@ async fn transfer_world_data(
 	world_data_sender: mpsc::Sender<Bytes>,
 	chunk_cache: Arc<ChunkCache>,
 ) -> anyhow::Result<()> {
+	let mut total_transferred = 0;
+	let start_time = Instant::now();
+	
 	let mut buf = BytesMut::new();
 	
 	// Receive world description
@@ -269,10 +273,7 @@ async fn transfer_world_data(
 		Err(err) => return Err(err.into()),
 	};
 	
-	let mut total_transferred = 0;
-	let start_time = Instant::now();
-	
-	total_transferred += world_ready_message_data.len() as u64;
+	total_transferred += world_ready_message_data.len();
 	
 	info!("Received world description, size: {}B", utils::abbreviate_number(world_ready_message_data.len() as u64));
 	
@@ -282,45 +283,9 @@ async fn transfer_world_data(
 	info!("World description: size: {}, crc: {}, file count: {}, total chunks: {}",
 		world_ready.new_info.world_size, world_ready.new_info.world_crc, world_desc.files.len(), world_desc.total_chunks);
 	
-	// Chunk fetching boilerplate
-	
 	let mut chunks_remaining;
 	let mut local_cache = HashMap::new();
-	
-	let mut fetch_chunk_batch = async |chunks_remaining: &mut _, local_cache: &mut _| {
-		let Some(batch) = chunk_cache.get_chunks_batched(chunks_remaining, local_cache, 512).await
-			else { return Ok(()); };
-		
-		let request_data = protocol_utils::encode_message_async(RequestChunksMessage {
-			requested_chunks: batch.batch_keys().to_vec(),
-		}).await?;
-		
-		protocol_utils::write_message(&mut send_stream, request_data).await?;
-		
-		let response_data = protocol_utils::read_message(&mut recv_stream, &mut buf).await?;
-		total_transferred += response_data.len() as u64;
-		
-		info!("Received batch of {} chunks, size: {}B",
-			batch.batch_keys().len(),
-			utils::abbreviate_number(response_data.len() as u64)
-		);
-		
-		let response: SendChunksMessage = protocol_utils::decode_message_async(response_data).await?;
-		
-		for (&key, chunk) in batch.batch_keys().iter().zip(response.chunks.iter()) {
-			let data_hash = blake3::hash(&chunk);
-			
-			if data_hash != key.0 {
-				return Err(anyhow::anyhow!("Chunk hash mismatch for {:?}", key));
-			}
-			
-			local_cache.insert(key, chunk.clone());
-		}
-		
-		batch.fulfill(&response.chunks);
-		
-		Ok(())
-	};
+	let mut chunk_batch_fetcher = ChunkBatchFetcher::new(&chunk_cache, &mut send_stream, &mut recv_stream);
 	
 	// Fetch file chunk lists
 	
@@ -331,7 +296,7 @@ async fn transfer_world_data(
 	info!("Loading chunk lists");
 	
 	while !chunks_remaining.is_empty() {
-		fetch_chunk_batch(&mut chunks_remaining, &mut local_cache).await?;
+		total_transferred += chunk_batch_fetcher.fetch_chunk_batch(&mut chunks_remaining, &mut local_cache).await?;
 	}
 	
 	let world_file_chunk_lists = world_desc.files.iter()
@@ -369,7 +334,7 @@ async fn transfer_world_data(
 						panic!("Emptied chunk list but reconstructor wants more data");
 					}
 					
-					fetch_chunk_batch(&mut chunks_remaining, &mut local_cache).await?;
+					total_transferred += chunk_batch_fetcher.fetch_chunk_batch(&mut chunks_remaining, &mut local_cache).await?;
 				}
 			}
 		}
@@ -379,7 +344,7 @@ async fn transfer_world_data(
 	
 	info!("Finished receiving world in {}s, total transferred: {}B, original size: {}B, dedup ratio: {:.2}%",
 		elapsed.as_secs(),
-		utils::abbreviate_number(total_transferred),
+		utils::abbreviate_number(total_transferred as u64),
 		utils::abbreviate_number(world_ready.old_info.world_size as u64),
 		(total_transferred as f64 / world_ready.old_info.world_size as f64) * 100.0,
 	);

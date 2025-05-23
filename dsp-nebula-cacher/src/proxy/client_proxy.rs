@@ -1,18 +1,23 @@
-use crate::protocol::InitialConnectionInfo;
+use crate::protocol::{DedupedPacketDescription, InitialConnectionInfo, StartDedupIndicator};
 use crate::proxy::copy_ws_to_ws;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use common::chunk_cache::ChunkCache;
-use common::protocol_utils;
+use common::protocol_utils::ChunkBatchFetcher;
+use common::{protocol_utils, utils};
 use fastwebsockets::upgrade::UpgradeFut;
-use fastwebsockets::Role;
+use fastwebsockets::{Frame, OpCode, Payload, Role, WebSocketRead, WebSocketWrite};
 use http_body_util::Empty;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use log::{error, info};
+use log::{error, info, };
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio::try_join;
 
 pub async fn run_client_proxy(
@@ -62,6 +67,7 @@ async fn handle_request(
 		client_uri: request.uri().to_string(),
 	}).await?;
 	
+	send_stream.write_u64(0).await?; // Indicate this isn't a dedup stream
 	protocol_utils::write_message(&mut send_stream, message_data).await?;
 	
 	tokio::spawn(async move {
@@ -78,7 +84,7 @@ async fn handle_ws_connection(
 	connection: Arc<quinn::Connection>,
 	send_stream: quinn::SendStream,
 	recv_stream: quinn::RecvStream,
-	chunk_cache: Arc<ChunkCache>
+	chunk_cache: Arc<ChunkCache>,
 ) -> anyhow::Result<()> {
 	let client_ws = ws_future.await?;
 	
@@ -95,9 +101,114 @@ async fn handle_ws_connection(
 	server_ws_read.set_auto_pong(false);
 	
 	try_join!(
-		copy_ws_to_ws(server_ws_read, client_ws_write),
+		copy_with_dedup(server_ws_read, client_ws_write, connection, chunk_cache),
 		copy_ws_to_ws(client_ws_read, server_ws_write)
 	)?;
+	
+	Ok(())
+}
+
+async fn copy_with_dedup<R, W>(
+	mut ws_read: WebSocketRead<R>,
+	mut ws_write: WebSocketWrite<W>,
+	connection: Arc<quinn::Connection>,
+	chunk_cache: Arc<ChunkCache>,
+) -> anyhow::Result<()>
+where
+	R: AsyncRead + Unpin,
+	W: AsyncWrite + Unpin,
+{
+	loop {
+		// Since we aren't using auto close or auto pong, we don't need to supply a send function
+		let frame = ws_read.read_frame(&mut async |_| anyhow::Ok(())).await?;
+		
+		if matches!(frame.opcode, OpCode::Binary | OpCode::Text) && frame.fin {
+			if let Some(indicator) = StartDedupIndicator::decode(frame.payload.as_ref()) {
+				let (tx, mut rx) = mpsc::channel(16);
+				
+				tokio::spawn(reconstruct_packet(indicator.dedup_id, tx, connection.clone(), chunk_cache.clone()));
+				
+				let mut first_frame = true;
+				let mut last_bytes: Option<Bytes> = None;
+				
+				while let Some(data) = rx.recv().await {
+					if let Some(last_bytes) = last_bytes.take() {
+						let op_code = if first_frame { OpCode::Binary } else { OpCode::Continuation };
+						
+						ws_write.write_frame(Frame::new(false, op_code, None, Payload::Borrowed(&last_bytes))).await?;
+						
+						first_frame = false;
+					}
+					
+					last_bytes = Some(data);
+				}
+				
+				if let Some(last_bytes) = last_bytes.take() {
+					let op_code = if first_frame { OpCode::Binary } else { OpCode::Continuation };
+					
+					ws_write.write_frame(Frame::new(true, op_code, None, Payload::Borrowed(&last_bytes))).await?;
+				}
+				
+				continue;
+			}
+		}
+		
+		ws_write.write_frame(frame).await?;
+	}
+}
+
+async fn reconstruct_packet(
+	dedup_stream_id: u64,
+	outgoing_packets: mpsc::Sender<Bytes>,
+	connection: Arc<quinn::Connection>,
+	chunk_cache: Arc<ChunkCache>,
+) -> anyhow::Result<()> {
+	let mut buf = BytesMut::new();
+	
+	info!("Receiving deduplicated packet");
+	
+	let (mut send_stream, mut recv_stream) = connection.open_bi().await?;
+	send_stream.write_u64(dedup_stream_id).await?;
+	
+	let mut total_transferred = 0;
+	let start_time = Instant::now();
+	
+	let packet_desc_message_data = protocol_utils::read_message(&mut recv_stream, &mut buf).await?;
+	
+	total_transferred += packet_desc_message_data.len();
+	info!("Received packet description, size: {}B", utils::abbreviate_number(packet_desc_message_data.len() as u64));
+	
+	let packet_desc: DedupedPacketDescription = protocol_utils::decode_message_async(packet_desc_message_data).await?;
+	
+	let mut chunks_remaining = packet_desc.packet.required_chunks();
+	let mut local_cache = HashMap::new();
+	let mut chunk_batch_fetcher = ChunkBatchFetcher::new(&chunk_cache, &mut send_stream, &mut recv_stream);
+	
+	while !chunks_remaining.is_empty() {
+		total_transferred += chunk_batch_fetcher.fetch_chunk_batch(&mut chunks_remaining, &mut local_cache).await?;
+	}
+	
+	let elapsed = start_time.elapsed();
+	
+	info!("Finished receiving packet in {}s, total transferred: {}B, original size: {}B, dedup ratio: {:.2}%",
+		elapsed.as_secs(),
+		utils::abbreviate_number(total_transferred as u64),
+		utils::abbreviate_number(packet_desc.original_packet_size),
+		(total_transferred as f64 / packet_desc.original_packet_size as f64) * 100.0,
+	);
+	
+	chunk_cache.mark_dirty();
+	
+	let packet = packet_desc.packet;
+	let reconstructed_data = tokio::task::spawn_blocking(move || packet.reconstruct(&local_cache)).await??;
+	
+	for fragment in reconstructed_data.chunks(2048) {
+		if outgoing_packets.send(fragment.to_vec().into()).await.is_err() {
+			info!("Peer disconnected while sending reconstructed packet");
+			
+			break;
+		}
+	}
 	
 	Ok(())
 }

@@ -1,5 +1,6 @@
 mod proxy;
 mod protocol;
+mod nebula_protocol;
 
 use std::net::Ipv4Addr;
 use std::net::{IpAddr, SocketAddr};

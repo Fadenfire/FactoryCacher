@@ -1,7 +1,6 @@
+use crate::nebula_protocol::NebulaPacket;
 use bytes::{Buf, BufMut};
-use fastwebsockets::OpCode;
-use quinn_proto::coding::Codec;
-use quinn_proto::VarInt;
+use hex_literal::hex;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -9,55 +8,34 @@ pub struct InitialConnectionInfo {
 	pub client_uri: String,
 }
 
-#[derive(Debug)]
-pub enum WsFrameHeader {
-	DedupedPacket {
-		stream_id: u64,
-	},
-	NormalFrame {
-		op_code: OpCode,
-		fin: bool,
-		data_size: VarInt,
-	}
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DedupedPacketDescription {
+	pub packet: NebulaPacket,
+	pub original_packet_size: u64,
 }
 
-impl WsFrameHeader {
-	pub fn encode(&self, mut buf: &mut impl BufMut) {
-		match *self {
-			WsFrameHeader::DedupedPacket { stream_id } => {
-				buf.put_u8(1 << 7);
-				buf.put_u64(stream_id);
-			}
-			WsFrameHeader::NormalFrame { op_code, fin, data_size } => {
-				let mut byte = op_code as u8;
-				if byte > 0xF { unreachable!("Opcode out of range"); }
-				
-				if fin { byte |= 1 << 4; }
-				
-				buf.put_u8(byte);
-				data_size.encode(&mut buf);
-			}
+#[derive(Debug)]
+pub struct StartDedupIndicator {
+	pub dedup_id: u64,
+}
+
+impl StartDedupIndicator {
+	pub const MAGIC_NUMBER: &'static [u8] = &hex!("17f84ac897b3676995b8f5fbc3a10c9beda02aab0e3e752e8b46a1af40cf860f");
+	
+	pub fn decode(mut buf: &[u8]) -> Option<Self> {
+		if !buf.starts_with(Self::MAGIC_NUMBER) {
+			return None;
 		}
+		
+		buf.advance(Self::MAGIC_NUMBER.len());
+		
+		Some(Self {
+			dedup_id: buf.try_get_u64().ok()?,
+		})
 	}
 	
-	pub fn decode(buf: &mut impl Buf) -> anyhow::Result<Self> {
-		let byte = buf.try_get_u8()?;
-		
-		if byte & (1 << 7) != 0 {
-			let stream_id = buf.try_get_u64()?;
-			
-			Ok(Self::DedupedPacket {
-				stream_id,
-			})
-		} else {
-			let data_size = VarInt::decode(buf)?;
-			let op_code = OpCode::try_from(byte & 0xF)?;
-			
-			Ok(Self::NormalFrame {
-				op_code,
-				fin: byte & (1 << 4) != 0,
-				data_size,
-			})
-		}
+	pub fn encode(&self, mut buf: impl BufMut) {
+		buf.put(Self::MAGIC_NUMBER);
+		buf.put_u64(self.dedup_id);
 	}
 }
