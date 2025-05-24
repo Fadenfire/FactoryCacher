@@ -18,7 +18,6 @@ use tokio::net::UdpSocket;
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
-use common::protocol_utils::{RequestChunksMessage, SendChunksMessage};
 
 pub async fn run_server_proxy(
 	connection: Arc<quinn::Connection>,

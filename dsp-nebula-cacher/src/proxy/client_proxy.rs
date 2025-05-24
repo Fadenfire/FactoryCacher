@@ -1,5 +1,5 @@
 use crate::protocol::{DedupedPacketDescription, InitialConnectionInfo, StartDedupIndicator};
-use crate::proxy::copy_ws_to_ws;
+use crate::proxy::{copy_ws_to_ws, read_ws_frame};
 use bytes::{Bytes, BytesMut};
 use common::chunk_cache::ChunkCache;
 use common::protocol_utils::ChunkBatchFetcher;
@@ -118,15 +118,19 @@ where
 	R: AsyncRead + Unpin,
 	W: AsyncWrite + Unpin,
 {
-	loop {
-		// Since we aren't using auto close or auto pong, we don't need to supply a send function
-		let frame = ws_read.read_frame(&mut async |_| anyhow::Ok(())).await?;
-		
+	while let Some(frame) = read_ws_frame(&mut ws_read).await? {
 		if matches!(frame.opcode, OpCode::Binary | OpCode::Text) && frame.fin {
 			if let Some(indicator) = StartDedupIndicator::decode(frame.payload.as_ref()) {
 				let (tx, mut rx) = mpsc::channel(16);
 				
-				tokio::spawn(reconstruct_packet(indicator.dedup_id, tx, connection.clone(), chunk_cache.clone()));
+				let connection = connection.clone();
+				let chunk_cache = chunk_cache.clone();
+				
+				tokio::spawn(async move {
+					if let Err(err) = reconstruct_packet(indicator.dedup_id, tx, connection, chunk_cache).await {
+						error!("Error reconstructing packet: {:?}", err);
+					}
+				});
 				
 				let mut first_frame = true;
 				let mut last_bytes: Option<Bytes> = None;
@@ -155,6 +159,8 @@ where
 		
 		ws_write.write_frame(frame).await?;
 	}
+	
+	Ok(())
 }
 
 async fn reconstruct_packet(
@@ -167,8 +173,12 @@ async fn reconstruct_packet(
 	
 	info!("Receiving deduplicated packet");
 	
+	// Open stream
+	
 	let (mut send_stream, mut recv_stream) = connection.open_bi().await?;
 	send_stream.write_u64(dedup_stream_id).await?;
+	
+	// Read desc
 	
 	let mut total_transferred = 0;
 	let start_time = Instant::now();
@@ -179,6 +189,8 @@ async fn reconstruct_packet(
 	info!("Received packet description, size: {}B", utils::abbreviate_number(packet_desc_message_data.len() as u64));
 	
 	let packet_desc: DedupedPacketDescription = protocol_utils::decode_message_async(packet_desc_message_data).await?;
+	
+	// Fetch chunks
 	
 	let mut chunks_remaining = packet_desc.packet.required_chunks();
 	let mut local_cache = HashMap::new();
@@ -198,6 +210,8 @@ async fn reconstruct_packet(
 	);
 	
 	chunk_cache.mark_dirty();
+	
+	// Reconstruct
 	
 	let packet = packet_desc.packet;
 	let reconstructed_data = tokio::task::spawn_blocking(move || packet.reconstruct(&local_cache)).await??;

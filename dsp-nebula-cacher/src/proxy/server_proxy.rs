@@ -1,6 +1,6 @@
 use crate::nebula_protocol::NebulaPacketHeader;
 use crate::protocol::{DedupedPacketDescription, InitialConnectionInfo, StartDedupIndicator};
-use crate::proxy::copy_ws_to_ws;
+use crate::proxy::{copy_ws_to_ws, read_ws_frame};
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use common::{protocol_utils, utils};
@@ -23,8 +23,7 @@ use tokio::try_join;
 type PendingDedupStreamsMap = HashMap<u64, oneshot::Sender<(quinn::SendStream, quinn::RecvStream)>>;
 
 pub async fn run_server_proxy(connection: Arc<quinn::Connection>, dsp_addr: SocketAddr) -> anyhow::Result<()> {
-	let pending_dedup_streams: Arc<Mutex<PendingDedupStreamsMap>> =
-		Arc::new(Mutex::new(HashMap::new()));
+	let pending_dedup_streams: Arc<Mutex<PendingDedupStreamsMap>> = Arc::new(Mutex::new(HashMap::new()));
 	
 	loop {
 		let (send_stream, mut recv_stream) = connection.accept_bi().await?;
@@ -112,10 +111,7 @@ where
 	R: AsyncRead + Unpin,
 	W: AsyncWrite + Unpin,
 {
-	loop {
-		// Since we aren't using auto close or auto pong, we don't need to supply a send function
-		let frame = ws_read.read_frame(&mut async |_| anyhow::Ok(())).await?;
-		
+	while let Some(frame) = read_ws_frame(&mut ws_read).await? {
 		if matches!(frame.opcode, OpCode::Binary | OpCode::Text) {
 			let mut frame_data = frame.payload.as_ref();
 			
@@ -131,18 +127,14 @@ where
 						let frame_data = frame_data.to_vec();
 						let was_first_frame_final = frame.fin;
 						
-						let result = dedup_packet(
+						dedup_packet(
 							&mut ws_read,
 							&mut ws_write,
 							&pending_dedup_streams,
 							packet_header,
 							frame_data,
 							was_first_frame_final
-						).await;
-						
-						if let Err(err) = result {
-							error!("Error deduplicating packet: {:?}", err);
-						}
+						).await.context("Deduplicating packet")?;
 						
 						continue;
 					}
@@ -155,6 +147,8 @@ where
 		
 		ws_write.write_frame(frame).await?;
 	}
+	
+	Ok(())
 }
 
 static NEXT_DEDUP_STREAM_ID: AtomicU64 = AtomicU64::new(1);
@@ -211,7 +205,7 @@ where
 		let packet = packet_header.deconstruct(packet_data, &mut all_chunks)?;
 		
 		anyhow::Ok((packet, all_chunks))
-	}).await??;
+	}).await?.context("Deconstructing packet")?;
 	
 	// Establishing channel with client
 	
