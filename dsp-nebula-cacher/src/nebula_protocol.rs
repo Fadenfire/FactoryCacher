@@ -8,6 +8,9 @@ use common::dedup::ChunkKey;
 
 const GAME_DATA_PACKET_ID: u64 = fnv1_hash(b"NebulaModel.Packets.Session.GlobalGameDataResponse");
 const FACTORY_DATA_PACKET_ID: u64 = fnv1_hash(b"NebulaModel.Packets.Planet.FactoryData");
+const DYSON_SPHERE_DATA_PACKET_ID: u64 = fnv1_hash(b"NebulaModel.Packets.Universe.DysonSphereData");
+
+// Global Game Data Response
 
 #[derive(Debug, Clone)]
 pub struct GlobalGameDataHeader {
@@ -58,6 +61,8 @@ impl GlobalGameDataPacket {
 		Ok(output_data.freeze())
 	}
 }
+
+// Factory Data
 
 #[derive(Debug, Clone)]
 pub struct FactoryDataHeader {
@@ -127,10 +132,68 @@ impl FactoryDataPacket {
 	}
 }
 
+// Dyson Sphere Data
+
+#[derive(Debug, Clone)]
+pub struct DysonSphereDataHeader {
+	pub star_index: u32,
+	pub data_length: u32,
+}
+
+impl DysonSphereDataHeader {
+	pub fn decode(mut buf: impl Buf) -> anyhow::Result<Self> {
+		Ok(Self {
+			star_index: buf.try_get_u32_le()?,
+			data_length: buf.try_get_u32_le()?,
+		})
+	}
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DysonSphereDataPacket {
+	pub star_index: u32,
+	pub data_chunk_list: Vec<ChunkKey>,
+	pub event_type: u32,
+}
+
+impl DysonSphereDataPacket {
+	pub fn deconstruct(
+		header: DysonSphereDataHeader,
+		mut packet_data: Bytes,
+		all_chunks: &mut HashMap<ChunkKey, Bytes>
+	) -> anyhow::Result<Self> {
+		let data_chunk_list =
+			deconstruct_lz4_data(&mut packet_data, header.data_length as usize, all_chunks)?;
+		
+		let event_type = packet_data.try_get_u32_le()?;
+		
+		Ok(Self {
+			star_index: header.star_index,
+			data_chunk_list,
+			event_type
+		})
+	}
+	
+	pub fn reconstruct(self, chunks: &HashMap<ChunkKey, Bytes>) -> anyhow::Result<Bytes> {
+		let mut output_data = BytesMut::new();
+		
+		let data = reconstruct_lz4_data(&self.data_chunk_list, chunks)?;
+		
+		output_data.put_u64_le(DYSON_SPHERE_DATA_PACKET_ID);
+		output_data.put_u32_le(self.star_index);
+		output_data.put_u32_le(data.len().try_into()?);
+		output_data.put(data);
+		output_data.put_u32_le(self.event_type);
+		
+		Ok(output_data.freeze())
+	}
+}
+
 #[derive(Debug, Clone)]
 pub enum NebulaPacketHeader {
 	GlobalGameData(GlobalGameDataHeader),
 	FactoryData(FactoryDataHeader),
+	DysonSphereData(DysonSphereDataHeader),
 }
 
 impl NebulaPacketHeader {
@@ -140,6 +203,7 @@ impl NebulaPacketHeader {
 		match packet_type {
 			GAME_DATA_PACKET_ID => Ok(Some(Self::GlobalGameData(GlobalGameDataHeader::decode(buf)?))),
 			FACTORY_DATA_PACKET_ID => Ok(Some(Self::FactoryData(FactoryDataHeader::decode(buf)?))),
+			DYSON_SPHERE_DATA_PACKET_ID => Ok(Some(Self::DysonSphereData(DysonSphereDataHeader::decode(buf)?))),
 			_ => Ok(None),
 		}
 	}
@@ -148,6 +212,7 @@ impl NebulaPacketHeader {
 		match self {
 			Self::GlobalGameData(header) => header.data_length as usize,
 			Self::FactoryData(header) => header.data_length as usize,
+			Self::DysonSphereData(header) => header.data_length as usize,
 		}
 	}
 	
@@ -160,6 +225,8 @@ impl NebulaPacketHeader {
 				Ok(NebulaPacket::GlobalGameData(GlobalGameDataPacket::deconstruct(header, packet_data, all_chunks)?)),
 			Self::FactoryData(header) =>
 				Ok(NebulaPacket::FactoryData(FactoryDataPacket::deconstruct(header, packet_data, all_chunks)?)),
+			Self::DysonSphereData(header) =>
+				Ok(NebulaPacket::DysonSphereData(DysonSphereDataPacket::deconstruct(header, packet_data, all_chunks)?)),
 		}
 	}
 }
@@ -168,6 +235,7 @@ impl NebulaPacketHeader {
 pub enum NebulaPacket {
 	GlobalGameData(GlobalGameDataPacket),
 	FactoryData(FactoryDataPacket),
+	DysonSphereData(DysonSphereDataPacket),
 }
 
 impl NebulaPacket {
@@ -175,16 +243,18 @@ impl NebulaPacket {
 		match self {
 			Self::GlobalGameData(packet) => packet.reconstruct(chunks),
 			Self::FactoryData(packet) => packet.reconstruct(chunks),
+			Self::DysonSphereData(packet) => packet.reconstruct(chunks),
 		}
 	}
 	
 	pub fn required_chunks(&self) -> Vec<ChunkKey> {
 		match self {
-			NebulaPacket::GlobalGameData(packet) => packet.data_chunk_list.clone(),
-			NebulaPacket::FactoryData(packet) => packet.data_chunk_list.iter()
+			Self::GlobalGameData(packet) => packet.data_chunk_list.clone(),
+			Self::FactoryData(packet) => packet.data_chunk_list.iter()
 				.copied()
 				.chain(packet.terrain_data_chunk_list.iter().copied())
 				.collect(),
+			Self::DysonSphereData(packet) => packet.data_chunk_list.clone(),
 		}
 	}
 }
