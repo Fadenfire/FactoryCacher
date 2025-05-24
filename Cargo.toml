@@ -20,3 +20,4 @@ simplelog = "0.12"
 time = { version = "0.3", features = ["macros"] }
 hashlink = "0.10"
 hex-literal = "1.0"
+igd-next = { version = "0.16" }

@@ -18,3 +18,4 @@ log.workspace = true
 simplelog.workspace = true
 time.workspace = true
 hashlink.workspace = true
+igd-next.workspace = true

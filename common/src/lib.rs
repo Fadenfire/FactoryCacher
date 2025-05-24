@@ -11,16 +11,21 @@ pub mod utils;
 pub mod chunk_cache;
 pub mod quic;
 pub mod protocol_utils;
+pub mod upnp;
 
-pub async fn cli_wrapper<F, Fut>(endpoint: &Endpoint, run: F)
+pub async fn cli_wrapper<F, Fut>(endpoint: &Endpoint, run: F) -> anyhow::Result<()>
 where
 	F: FnOnce() -> Fut,
 	Fut: Future<Output = anyhow::Result<()>>,
 {
+	let mut run_result = Ok(());
+	
 	select! {
-		result = run() => result.unwrap(),
+		result = run() => { run_result = result; },
 		_ = tokio::signal::ctrl_c() => {}
 	}
+	
+	info!("Shutting down");
 	
 	endpoint.close(0u32.into(), b"quit");
 	
@@ -29,7 +34,7 @@ where
 		_ = tokio::signal::ctrl_c() => {}
 	}
 	
-	info!("Shutdown");
+	run_result
 }
 
 pub async fn run_server<F, Fut>(endpoint: &Endpoint, handle_conn: F) -> anyhow::Result<()>

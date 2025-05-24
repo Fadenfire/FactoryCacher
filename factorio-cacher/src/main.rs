@@ -1,6 +1,6 @@
 use crate::proxy::{client_proxy, server_proxy};
 use argh::FromArgs;
-use common::quic;
+use common::{quic, upnp};
 use log::info;
 use quinn::Endpoint;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -73,6 +73,10 @@ struct ServerArgs {
 	#[argh(positional)]
 	/// factorio server address in host:port form
 	factorio_address: String,
+	
+	#[argh(switch)]
+	/// enable UPNP port forwarding
+	upnp: bool,
 }
 
 #[tokio::main()]
@@ -90,7 +94,7 @@ async fn main() {
 async fn subcommand_client(args: ClientArgs) {
 	let (endpoint, server_address) = quic::create_client_endpoint(&args.server_address).await;
 	
-	common::cli_wrapper(&endpoint, || run_client(&endpoint, server_address, &args)).await;
+	common::cli_wrapper(&endpoint, || run_client(&endpoint, server_address, &args)).await.unwrap();
 }
 
 async fn run_client(endpoint: &Endpoint, server_address: SocketAddr, args: &ClientArgs) -> anyhow::Result<()> {
@@ -124,7 +128,9 @@ async fn subcommand_server(args: ServerArgs) {
 	
 	let endpoint = quic::create_server_endpoint(SocketAddr::new(args.host, args.port));
 	
+	let _upnp_port_mapping = if args.upnp { Some(upnp::open_port(args.port).unwrap()) } else { None };
+	
 	common::cli_wrapper(&endpoint, || {
 		common::run_server(&endpoint, move |conn| server_proxy::run_server_proxy(conn, factorio_address))
-	}).await;
+	}).await.unwrap();
 }

@@ -1,4 +1,5 @@
 use bytes::{Buf, TryGetError};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
 pub trait BufExt {
 	fn try_get_factorio_varint32(&mut self) -> Result<u32, TryGetError>;
@@ -28,4 +29,13 @@ pub fn abbreviate_number(num: u64) -> String {
 	let unit = POWER_UNITS.get((power - 1) as usize).unwrap_or(&'?');
 	
 	format!("{:.2}{}", x, unit)
+}
+
+pub fn get_local_ip() -> anyhow::Result<IpAddr> {
+	let sock = UdpSocket::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0))?;
+	sock.connect(SocketAddr::from(([10, 255, 255, 255], 1)))?;
+	
+	let sock_addr = sock.local_addr()?;
+	
+	Ok(sock_addr.ip())
 }
