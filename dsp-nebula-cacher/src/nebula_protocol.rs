@@ -144,6 +144,13 @@ impl NebulaPacketHeader {
 		}
 	}
 	
+	pub fn approx_size(&self) -> usize {
+		match self {
+			Self::GlobalGameData(header) => header.data_length as usize,
+			Self::FactoryData(header) => header.data_length as usize,
+		}
+	}
+	
 	pub fn deconstruct(self,
 		packet_data: Bytes,
 		all_chunks: &mut HashMap<ChunkKey, Bytes>

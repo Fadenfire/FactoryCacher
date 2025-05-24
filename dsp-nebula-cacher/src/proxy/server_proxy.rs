@@ -100,7 +100,7 @@ async fn proxy_server(
 	Ok(())
 }
 
-const MINIMUM_DEDUP_SIZE: u32 = 64 * 1024;
+const MINIMUM_DEDUP_SIZE: usize = 128 * 1024;
 
 async fn copy_with_dedup<R, W>(
 	mut ws_read: WebSocketRead<R>,
@@ -118,12 +118,7 @@ where
 			match NebulaPacketHeader::decode(&mut frame_data) {
 				Ok(None) => {}
 				Ok(Some(packet_header)) => {
-					let worth_dedup = match &packet_header {
-						NebulaPacketHeader::GlobalGameData(header) => header.data_length > MINIMUM_DEDUP_SIZE,
-						NebulaPacketHeader::FactoryData(header) => header.data_length > MINIMUM_DEDUP_SIZE,
-					};
-					
-					if worth_dedup {
+					if packet_header.approx_size() > MINIMUM_DEDUP_SIZE {
 						let frame_data = frame_data.to_vec();
 						let was_first_frame_final = frame.fin;
 						
