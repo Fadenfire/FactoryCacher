@@ -68,7 +68,7 @@ impl ChunkCache {
 	async fn try_save(&self, cache_path: PathBuf) -> anyhow::Result<()> {
 		let total_size;
 		
-		let cache_entries: Vec<_> = {
+		let raw_cache = {
 			let mut inner = self.inner.lock().expect("chunk cache poisoned");
 			
 			if !inner.needs_saving {
@@ -80,17 +80,15 @@ impl ChunkCache {
 			inner.needs_saving = false;
 			total_size = inner.raw_cache.total_size;
 			
-			inner.raw_cache.chunks.iter()
-				.map(|(k, v)| (k.clone(), v.clone()))
-				.collect()
+			inner.raw_cache.clone()
 		};
 		
-		let chunk_count = cache_entries.len();
+		let chunk_count = raw_cache.len();
 		
 		let compressed_size = tokio::task::spawn_blocking(move || -> anyhow::Result<u64> {
 			let temp_path = cache_path.with_extension("tmp");
 			
-			write_chunk_cache(&cache_entries, &temp_path)?;
+			write_chunk_cache(&raw_cache, &temp_path)?;
 			
 			let written_size = std::fs::metadata(&temp_path)?.len();
 			std::fs::rename(&temp_path, &cache_path)?;
@@ -250,6 +248,7 @@ impl<'a> BatchChunkRequest<'a> {
 	}
 }
 
+#[derive(Clone)]
 struct RawChunkCache {
 	chunks: LinkedHashMap<ChunkKey, Bytes>,
 	total_size: u64,
@@ -281,6 +280,10 @@ impl RawChunkCache {
 	
 	pub fn get(&mut self, key: &ChunkKey) -> Option<&Bytes> {
 		self.chunks.to_back(key).map(|b| &*b)
+	}
+	
+	pub fn len(&self) -> usize {
+		self.chunks.len()
 	}
 }
 
@@ -324,17 +327,17 @@ fn read_chunk_cache(cache: &mut RawChunkCache, cache_path: &Path) -> anyhow::Res
 	Ok(())
 }
 
-fn write_chunk_cache(cache_entries: &[(ChunkKey, Bytes)], cache_path: &Path) -> anyhow::Result<()> {
+fn write_chunk_cache(cache: &RawChunkCache, cache_path: &Path) -> anyhow::Result<()> {
 	let file = std::fs::File::create(cache_path)?;
 	let writer = BufWriter::new(file);
 	let mut encoder = zstd::Encoder::new(writer, CHUNK_CACHE_COMPRESSION_LEVEL)?;
 	
-	encoder.write_all(&u32::try_from(cache_entries.len())
+	encoder.write_all(&u32::try_from(cache.len())
 		.expect("Chunk count wouldn't fit into a u32")
 		.to_le_bytes()
 	)?;
 	
-	for (key, chunk) in cache_entries {
+	for (key, chunk) in cache.chunks.iter() {
 		encoder.write_all(key.0.as_bytes())?;
 		
 		encoder.write_all(&u32::try_from(chunk.len())
