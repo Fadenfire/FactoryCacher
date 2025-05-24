@@ -2,6 +2,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use std::sync::Arc;
 use std::time::Duration;
+use anyhow::Context;
 use quinn::Endpoint;
 use rustls::pki_types::pem::PemObject;
 use tokio::net::lookup_host;
@@ -59,4 +60,16 @@ pub async fn create_client_endpoint(server_address: &str) -> (Endpoint, SocketAd
 	endpoint.set_default_client_config(make_client_config());
 	
 	(endpoint, server_address)
+}
+
+pub fn create_server_endpoint(listen_address: SocketAddr) -> Endpoint {
+	Endpoint::server(make_server_config(), listen_address).unwrap()
+}
+
+pub async fn client_connect(endpoint: &Endpoint, server_address: SocketAddr) -> anyhow::Result<Arc<quinn::Connection>> {
+	let conn = endpoint.connect(server_address, "localhost")?
+		.await
+		.context("QUIC connecting")?;
+	
+	Ok(Arc::new(conn))
 }

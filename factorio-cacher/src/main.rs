@@ -1,8 +1,7 @@
 use crate::proxy::{client_proxy, server_proxy};
-use anyhow::Context;
 use argh::FromArgs;
 use common::quic;
-use log::{error, info};
+use log::info;
 use quinn::Endpoint;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -97,7 +96,7 @@ async fn subcommand_client(args: ClientArgs) {
 async fn run_client(endpoint: &Endpoint, server_address: SocketAddr, args: &ClientArgs) -> anyhow::Result<()> {
 	info!("Connecting...");
 	
-	let quic_connection = Arc::new(endpoint.connect(server_address, "localhost")?.await.context("QUIC connecting")?);
+	let quic_connection = quic::client_connect(endpoint, server_address).await?;
 	
 	let listen_address = SocketAddr::new(args.host, args.port);
 	let socket = Arc::new(UdpSocket::bind(listen_address).await?);
@@ -123,29 +122,9 @@ async fn subcommand_server(args: ServerArgs) {
 		.next()
 		.expect("No server address found");
 	
-	let listen_address = SocketAddr::new(args.host, args.port);
-	let endpoint = Endpoint::server(quic::make_server_config(), listen_address).unwrap();
+	let endpoint = quic::create_server_endpoint(SocketAddr::new(args.host, args.port));
 	
-	common::cli_wrapper(&endpoint, || run_server(&endpoint, factorio_address)).await;
+	common::cli_wrapper(&endpoint, || {
+		common::run_server(&endpoint, move |conn| server_proxy::run_server_proxy(conn, factorio_address))
+	}).await;
 }
-
-async fn run_server(endpoint: &Endpoint, factorio_address: SocketAddr) -> anyhow::Result<()> {
-	info!("Started");
-	
-	loop {
-		let connection = endpoint.accept().await.unwrap().await?;
-		
-		tokio::spawn(async move {
-			let client_address = connection.remote_address();
-			
-			info!("Client from {:?} connected", client_address);
-			
-			if let Err(err) = server_proxy::run_server_proxy(Arc::new(connection), factorio_address).await {
-				error!("Error running server: {:?}", err);
-			}
-			
-			info!("Client from {:?} disconnected", client_address);
-		});
-	}
-}
-

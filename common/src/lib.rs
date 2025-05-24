@@ -1,10 +1,10 @@
+use crate::chunk_cache::ChunkCache;
+use log::{error, info};
+use quinn::Endpoint;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use log::info;
-use quinn::Endpoint;
 use tokio::select;
-use crate::chunk_cache::ChunkCache;
 
 pub mod dedup;
 pub mod utils;
@@ -30,6 +30,31 @@ where
 	}
 	
 	info!("Shutdown");
+}
+
+pub async fn run_server<F, Fut>(endpoint: &Endpoint, handle_conn: F) -> anyhow::Result<()>
+where
+	F: Fn(Arc<quinn::Connection>) -> Fut + Clone + Send + 'static,
+	Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+	info!("Started");
+	
+	loop {
+		let connection = endpoint.accept().await.unwrap().await?;
+		let handle_conn = handle_conn.clone();
+		
+		tokio::spawn(async move {
+			let client_address = connection.remote_address();
+			
+			info!("Client from {:?} connected", client_address);
+			
+			if let Err(err) = handle_conn(Arc::new(connection)).await {
+				error!("Error running server: {:?}", err);
+			}
+			
+			info!("Client from {:?} disconnected", client_address);
+		});
+	}
 }
 
 pub async fn create_chunk_cache(

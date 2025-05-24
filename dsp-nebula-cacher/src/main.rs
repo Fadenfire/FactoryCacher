@@ -2,17 +2,15 @@ mod proxy;
 mod protocol;
 mod nebula_protocol;
 
+use crate::proxy::{client_proxy, server_proxy};
+use argh::FromArgs;
+use common::quic;
+use log::info;
+use quinn::Endpoint;
 use std::net::Ipv4Addr;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
-use anyhow::Context;
-use argh::FromArgs;
-use log::{error, info};
-use quinn::Endpoint;
 use tokio::net::{lookup_host, TcpListener};
-use common::quic;
-use crate::proxy::{client_proxy, server_proxy};
 
 #[derive(FromArgs)]
 /// Factorio cacher
@@ -95,7 +93,7 @@ async fn subcommand_client(args: ClientArgs) {
 async fn run_client(endpoint: &Endpoint, server_address: SocketAddr, args: &ClientArgs) -> anyhow::Result<()> {
 	info!("Connecting...");
 	
-	let quic_connection = Arc::new(endpoint.connect(server_address, "localhost")?.await.context("QUIC connecting")?);
+	let quic_connection = quic::client_connect(endpoint, server_address).await?;
 	
 	let listen_address = SocketAddr::new(args.host, args.port);
 	let tcp_listener = TcpListener::bind(listen_address).await?;
@@ -121,28 +119,9 @@ async fn subcommand_server(args: ServerArgs) {
 		.next()
 		.expect("No server address found");
 	
-	let listen_address = SocketAddr::new(args.host, args.port);
-	let endpoint = Endpoint::server(quic::make_server_config(), listen_address).unwrap();
+	let endpoint = quic::create_server_endpoint(SocketAddr::new(args.host, args.port));
 	
-	common::cli_wrapper(&endpoint, || run_server(&endpoint, dsp_address)).await;
-}
-
-async fn run_server(endpoint: &Endpoint, dsp_address: SocketAddr) -> anyhow::Result<()> {
-	info!("Started");
-	
-	loop {
-		let connection = endpoint.accept().await.unwrap().await?;
-		
-		tokio::spawn(async move {
-			let client_address = connection.remote_address();
-			
-			info!("Client from {:?} connected", client_address);
-			
-			if let Err(err) = server_proxy::run_server_proxy(Arc::new(connection), dsp_address).await {
-				error!("Error running server: {:?}", err);
-			}
-			
-			info!("Client from {:?} disconnected", client_address);
-		});
-	}
+	common::cli_wrapper(&endpoint, || {
+		common::run_server(&endpoint, move |conn| server_proxy::run_server_proxy(conn, dsp_address))
+	}).await;
 }
