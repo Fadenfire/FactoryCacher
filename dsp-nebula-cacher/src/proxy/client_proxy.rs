@@ -18,7 +18,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
-use tokio::try_join;
+use tokio::{select, try_join};
 
 pub async fn run_client_proxy(
 	tcp_listener: TcpListener,
@@ -26,10 +26,19 @@ pub async fn run_client_proxy(
 	chunk_cache: Arc<ChunkCache>,
 ) -> anyhow::Result<()> {
 	loop {
-		let (tcp_stream, addr) = tcp_listener.accept().await?;
-		info!("New peer from {:?}", addr);
-		
-		tokio::spawn(handle_connection(tcp_stream, connection.clone(), chunk_cache.clone()));
+		select! {
+			result = tcp_listener.accept() => {
+				let (tcp_stream, addr) = result?;
+				info!("New peer from {:?}", addr);
+				
+				tokio::spawn(handle_connection(tcp_stream, connection.clone(), chunk_cache.clone()));
+			}
+			_ = connection.closed() => {
+				info!("Connection closed");
+				
+				return Ok(());
+			}
+		}
 	}
 }
 
@@ -104,6 +113,8 @@ async fn handle_ws_connection(
 		copy_with_dedup(server_ws_read, client_ws_write, connection, chunk_cache),
 		copy_ws_to_ws(client_ws_read, server_ws_write)
 	)?;
+	
+	info!("Peer disconnected");
 	
 	Ok(())
 }

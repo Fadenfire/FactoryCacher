@@ -97,6 +97,8 @@ async fn proxy_server(
 		copy_ws_to_ws(client_ws_read, server_ws_write)
 	)?;
 	
+	info!("Peer disconnected");
+	
 	Ok(())
 }
 
