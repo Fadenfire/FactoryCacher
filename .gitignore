@@ -7,4 +7,5 @@
 /target
 /certs
 /run
-/factorio-cacher/build-for-website.sh
+
+build-for-website.sh
