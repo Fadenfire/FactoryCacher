@@ -1,8 +1,8 @@
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use crate::utils;
 use anyhow::Context;
 use igd_next::{PortMappingProtocol, SearchOptions};
 use log::{error, info};
-use crate::utils;
+use std::net::SocketAddr;
 
 pub const LEASE_DURATION: u32 = 24 * 60 * 60;
 
