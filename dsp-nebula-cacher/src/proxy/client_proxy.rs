@@ -43,6 +43,8 @@ pub async fn run_client_proxy(
 }
 
 async fn handle_connection(tcp_stream: TcpStream, connection: Arc<quinn::Connection>, chunk_cache: Arc<ChunkCache>) {
+	tcp_stream.set_nodelay(true).expect("Error disabling Nagle algorithm");
+	
 	let service = service_fn(|req| {
 		handle_request(req, connection.clone(), chunk_cache.clone())
 	});

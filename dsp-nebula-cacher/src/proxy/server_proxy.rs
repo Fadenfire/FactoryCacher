@@ -63,6 +63,7 @@ async fn proxy_server(
 	let initial_info: InitialConnectionInfo = protocol_utils::decode_message_async(message_data).await?;
 	
 	let socket = TcpStream::connect(dsp_addr).await?;
+	socket.set_nodelay(true)?;
 	
 	let req = Request::builder()
 		.method(Method::GET)
