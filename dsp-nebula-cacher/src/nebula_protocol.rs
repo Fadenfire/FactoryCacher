@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
+use common::chunks::ChunkProvider;
 use common::dedup;
 use common::dedup::ChunkKey;
 
@@ -48,10 +49,10 @@ impl GlobalGameDataPacket {
 		})
 	}
 	
-	pub fn reconstruct(self, chunks: &HashMap<ChunkKey, Bytes>) -> anyhow::Result<Bytes> {
+	pub async fn reconstruct(self, chunks: &mut impl ChunkProvider) -> anyhow::Result<Bytes> {
 		let mut output_data = BytesMut::new();
 		
-		let data = reconstruct_lz4_data(&self.data_chunk_list, chunks)?;
+		let data = reconstruct_lz4_data(&self.data_chunk_list, chunks).await?;
 		
 		output_data.put_u64_le(GAME_DATA_PACKET_ID);
 		output_data.put_u8(self.data_type);
@@ -106,23 +107,24 @@ impl FactoryDataPacket {
 		})
 	}
 	
-	pub fn reconstruct(self, chunks: &HashMap<ChunkKey, Bytes>) -> anyhow::Result<Bytes> {
+	pub async fn reconstruct(self, chunks: &mut impl ChunkProvider) -> anyhow::Result<Bytes> {
 		let mut output_data = BytesMut::new();
 		
 		output_data.put_u64_le(FACTORY_DATA_PACKET_ID);
 		output_data.put_u32_le(self.planet_id);
 		
-		let data = reconstruct_lz4_data(&self.data_chunk_list, chunks)?;
+		let data = reconstruct_lz4_data(&self.data_chunk_list, chunks).await?;
 		
 		output_data.put_u32_le(data.len().try_into()?);
 		output_data.put(data);
 		
 		let mut terrain_data = Vec::new();
 		
-		for chunk_key in &self.terrain_data_chunk_list {
-			let chunk = chunks.get(chunk_key).ok_or_else(|| anyhow::anyhow!("Chunk key doesn't exist"))?;
+		for &chunk_key in &self.terrain_data_chunk_list {
+			let chunk = chunks.get_chunk(chunk_key).await?
+				.ok_or_else(|| anyhow::anyhow!("Chunk key doesn't exist"))?;
 			
-			terrain_data.extend_from_slice(chunk);
+			terrain_data.extend_from_slice(&chunk);
 		}
 		
 		output_data.put_u32_le(terrain_data.len().try_into()?);
@@ -174,10 +176,10 @@ impl DysonSphereDataPacket {
 		})
 	}
 	
-	pub fn reconstruct(self, chunks: &HashMap<ChunkKey, Bytes>) -> anyhow::Result<Bytes> {
+	pub async fn reconstruct(self, chunks: &mut impl ChunkProvider) -> anyhow::Result<Bytes> {
 		let mut output_data = BytesMut::new();
 		
-		let data = reconstruct_lz4_data(&self.data_chunk_list, chunks)?;
+		let data = reconstruct_lz4_data(&self.data_chunk_list, chunks).await?;
 		
 		output_data.put_u64_le(DYSON_SPHERE_DATA_PACKET_ID);
 		output_data.put_u32_le(self.star_index);
@@ -218,7 +220,7 @@ impl NebulaPacketHeader {
 	
 	pub fn deconstruct(self,
 		packet_data: Bytes,
-		all_chunks: &mut HashMap<ChunkKey, Bytes>
+		all_chunks: &mut HashMap<ChunkKey, Bytes>,
 	) -> anyhow::Result<NebulaPacket> {
 		match self {
 			Self::GlobalGameData(header) =>
@@ -239,11 +241,11 @@ pub enum NebulaPacket {
 }
 
 impl NebulaPacket {
-	pub fn reconstruct(self, chunks: &HashMap<ChunkKey, Bytes>) -> anyhow::Result<Bytes> {
+	pub async fn reconstruct(self, chunks: &mut impl ChunkProvider) -> anyhow::Result<Bytes> {
 		match self {
-			Self::GlobalGameData(packet) => packet.reconstruct(chunks),
-			Self::FactoryData(packet) => packet.reconstruct(chunks),
-			Self::DysonSphereData(packet) => packet.reconstruct(chunks),
+			Self::GlobalGameData(packet) => packet.reconstruct(chunks).await,
+			Self::FactoryData(packet) => packet.reconstruct(chunks).await,
+			Self::DysonSphereData(packet) => packet.reconstruct(chunks).await,
 		}
 	}
 	
@@ -272,11 +274,12 @@ fn deconstruct_lz4_data(
 	Ok(chunk_list)
 }
 
-fn reconstruct_lz4_data(chunk_list: &[ChunkKey], chunks: &HashMap<ChunkKey, Bytes>) -> anyhow::Result<Bytes> {
+async fn reconstruct_lz4_data(chunk_list: &[ChunkKey], chunks: &mut impl ChunkProvider) -> anyhow::Result<Bytes> {
 	let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
 	
-	for chunk_key in chunk_list {
-		let chunk = chunks.get(chunk_key).ok_or_else(|| anyhow::anyhow!("Chunk key doesn't exist"))?;
+	for &chunk_key in chunk_list {
+		let chunk = chunks.get_chunk(chunk_key).await?
+			.ok_or_else(|| anyhow::anyhow!("Chunk key doesn't exist"))?;
 		
 		encoder.write_all(&chunk)?;
 	}

@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
+use anyhow::anyhow;
 use zip::ZipArchive;
+use common::chunks::ChunkProvider;
 
 pub const RECONSTRUCT_DEFLATE_LEVEL: u8 = 1;
 
@@ -96,8 +98,6 @@ pub struct WorldReconstructor {
 	crc_hasher: crc::Digest<'static, u32>,
 }
 
-pub struct NeedsMoreData;
-
 impl WorldReconstructor {
 	pub fn new() -> Self {
 		Self {
@@ -106,19 +106,19 @@ impl WorldReconstructor {
 		}
 	}
 	
-	pub fn reconstruct_world_file(
+	pub async fn reconstruct_world_file(
 		&mut self,
 		file_desc: &FactorioFileDescription,
 		file_chunk_list: &FactorioFileChunkList,
-		all_chunks: &HashMap<ChunkKey, Bytes>,
-	) -> Result<[Bytes; 2], NeedsMoreData> {
+		chunks: &mut impl ChunkProvider,
+	) -> anyhow::Result<[Bytes; 2]> {
 		let mut buf = Vec::new();
 		
 		for &chunk_key in &file_chunk_list.content_chunks {
-			if let Some(chunk) = all_chunks.get(&chunk_key) {
-				buf.extend_from_slice(chunk);
+			if let Some(chunk) = chunks.get_chunk(chunk_key).await? {
+				buf.extend_from_slice(&chunk);
 			} else {
-				return Err(NeedsMoreData);
+				return Err(anyhow!("Chunk not found"));
 			}
 		}
 		

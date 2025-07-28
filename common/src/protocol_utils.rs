@@ -7,6 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use crate::chunks::ChunkProvider;
 
 const ZSTD_COMPRESSION_LEVEL: i32 = 9;
 const MESSAGE_SIZE_LIMIT: usize = 20_000_000;
@@ -104,15 +105,19 @@ pub async fn provide_chunks_as_requested(
 	Ok(total_transferred)
 }
 
-pub struct ChunkBatchFetcher<'a> {
+pub struct ChunkFetcherProvider<'a> {
 	chunk_cache: &'a ChunkCache,
 	send_stream: &'a mut quinn::SendStream,
 	recv_stream: &'a mut quinn::RecvStream,
 	
+	local_cache: HashMap<ChunkKey, Bytes>,
+	chunks_remaining: Vec<ChunkKey>,
+	total_transferred: usize,
+	
 	buffer: BytesMut,
 }
 
-impl<'a> ChunkBatchFetcher<'a> {
+impl<'a> ChunkFetcherProvider<'a> {
 	pub fn new(
 		chunk_cache: &'a ChunkCache,
 		send_stream: &'a mut quinn::SendStream,
@@ -123,27 +128,55 @@ impl<'a> ChunkBatchFetcher<'a> {
 			send_stream,
 			recv_stream,
 			
+			local_cache: HashMap::new(),
+			chunks_remaining: Vec::new(),
+			total_transferred: 0,
+			
 			buffer: BytesMut::new(),
 		}
 	}
 	
-	pub async fn fetch_chunk_batch(&mut self, chunks_remaining: &mut Vec<ChunkKey>, local_cache: &mut HashMap<ChunkKey, Bytes>) -> anyhow::Result<usize> {
-		let Some(batch) = self.chunk_cache.get_chunks_batched(chunks_remaining, local_cache, 512).await
-			else { return Ok(0); };
-		
-		let mut transferred = 0;
+	pub fn set_chunks_remaining(&mut self, chunks_remaining: Vec<ChunkKey>) {
+		self.chunks_remaining = chunks_remaining;
+	}
+	
+	pub fn total_transferred(&self) -> usize {
+		self.total_transferred
+	}
+}
+
+impl<'a> ChunkProvider for ChunkFetcherProvider<'a> {
+	async fn get_chunk(&mut self, key: ChunkKey) -> anyhow::Result<Option<Bytes>> {
+		loop {
+			if let Some(chunk) = self.local_cache.get(&key) {
+				return Ok(Some(chunk.clone()));
+			}
+			
+			if self.chunks_remaining.is_empty() {
+				return Ok(None);
+			}
+			
+			self.fetch_chunk_batch().await?;
+		}
+	}
+}
+
+impl<'a> ChunkFetcherProvider<'a> {
+	async fn fetch_chunk_batch(&mut self) -> anyhow::Result<()> {
+		let Some(batch) = self.chunk_cache.get_chunks_batched(&mut self.chunks_remaining, &mut self.local_cache, 512).await
+			else { return Ok(()); };
 		
 		let request_data = encode_message_async(RequestChunksMessage {
 			requested_chunks: batch.batch_keys().to_vec(),
 		}).await?;
 		
-		transferred += request_data.len();
+		self.total_transferred += request_data.len();
 		
 		write_message(self.send_stream, request_data).await?;
 		
 		let response_data = read_message(self.recv_stream, &mut self.buffer).await?;
 		
-		transferred += response_data.len();
+		self.total_transferred += response_data.len();
 		
 		info!("Received batch of {} chunks, size: {}B",
 			batch.batch_keys().len(),
@@ -159,11 +192,11 @@ impl<'a> ChunkBatchFetcher<'a> {
 				return Err(anyhow::anyhow!("Chunk hash mismatch for {:?}", key));
 			}
 			
-			local_cache.insert(key, chunk.clone());
+			self.local_cache.insert(key, chunk.clone());
 		}
 		
 		batch.fulfill(&response.chunks);
 		
-		Ok(transferred)
+		Ok(())
 	}
 }

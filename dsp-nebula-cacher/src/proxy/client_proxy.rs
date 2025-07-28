@@ -2,7 +2,7 @@ use crate::protocol::{DedupedPacketDescription, InitialConnectionInfo, StartDedu
 use crate::proxy::{copy_ws_to_ws, read_ws_frame};
 use bytes::{Bytes, BytesMut};
 use common::chunk_cache::ChunkCache;
-use common::protocol_utils::ChunkBatchFetcher;
+use common::protocol_utils::{ChunkBatchFetcher, ChunkFetcherProvider};
 use common::{protocol_utils, utils};
 use fastwebsockets::upgrade::UpgradeFut;
 use fastwebsockets::{Frame, OpCode, Payload, Role, WebSocketRead, WebSocketWrite};
@@ -205,13 +205,10 @@ async fn reconstruct_packet(
 	
 	// Fetch chunks
 	
-	let mut chunks_remaining = packet_desc.packet.required_chunks();
-	let mut local_cache = HashMap::new();
-	let mut chunk_batch_fetcher = ChunkBatchFetcher::new(&chunk_cache, &mut send_stream, &mut recv_stream);
+	let mut chunk_fetcher = ChunkFetcherProvider::new(&chunk_cache, &mut send_stream, &mut recv_stream);
+	chunk_fetcher.set_chunks_remaining(packet_desc.packet.required_chunks());
 	
-	while !chunks_remaining.is_empty() {
-		total_transferred += chunk_batch_fetcher.fetch_chunk_batch(&mut chunks_remaining, &mut local_cache).await?;
-	}
+	
 	
 	let elapsed = start_time.elapsed();
 	
@@ -227,7 +224,7 @@ async fn reconstruct_packet(
 	// Reconstruct
 	
 	let packet = packet_desc.packet;
-	let reconstructed_data = tokio::task::spawn_blocking(move || packet.reconstruct(&local_cache)).await??;
+	let reconstructed_data = tokio::task::spawn(packet.reconstruct(&mut chunk_fetcher)).await??;
 	
 	for fragment in reconstructed_data.chunks(2048) {
 		if outgoing_packets.send(fragment.to_vec().into()).await.is_err() {

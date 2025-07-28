@@ -5,7 +5,8 @@ use crate::proxy::{PacketDirection, UDP_QUEUE_SIZE};
 use anyhow::anyhow;
 use bytes::{Bytes, BytesMut};
 use common::chunk_cache::ChunkCache;
-use common::protocol_utils::ChunkBatchFetcher;
+use common::chunks::ChunkProvider;
+use common::protocol_utils::ChunkFetcherProvider;
 use common::{protocol_utils, utils};
 use log::{debug, error, info};
 use quinn_proto::VarInt;
@@ -283,62 +284,55 @@ async fn transfer_world_data(
 	info!("World description: size: {}, crc: {}, file count: {}, total chunks: {}",
 		world_ready.new_info.world_size, world_ready.new_info.world_crc, world_desc.files.len(), world_desc.total_chunks);
 	
-	let mut chunks_remaining;
-	let mut local_cache = HashMap::new();
-	let mut chunk_batch_fetcher = ChunkBatchFetcher::new(&chunk_cache, &mut send_stream, &mut recv_stream);
+	let mut chunk_fetcher = ChunkFetcherProvider::new(&chunk_cache, &mut send_stream, &mut recv_stream);
 	
 	// Fetch file chunk lists
 	
-	chunks_remaining = world_desc.files.iter()
-		.map(|file| file.chunk_list_key)
-		.collect::<Vec<_>>();
+	chunk_fetcher.set_chunks_remaining(
+		world_desc.files.iter()
+			.map(|file| file.chunk_list_key)
+			.collect::<Vec<_>>()
+	);
 	
 	info!("Loading chunk lists");
 	
-	while !chunks_remaining.is_empty() {
-		total_transferred += chunk_batch_fetcher.fetch_chunk_batch(&mut chunks_remaining, &mut local_cache).await?;
-	}
+	let mut world_file_chunk_lists = Vec::new();
 	
-	let world_file_chunk_lists = world_desc.files.iter()
-		.map(|file| {
-			let encoded_content_desc = local_cache.get(&file.chunk_list_key)
-				.expect("File content desc key not in local cache after fetching");
-			
-			rmp_serde::from_slice(&encoded_content_desc).map_err(Into::into)
-		})
-		.collect::<anyhow::Result<Vec<FactorioFileChunkList>>>()?;
+	for file in &world_desc.files {
+		let encoded_content_desc = chunk_fetcher.get_chunk(file.chunk_list_key).await?
+			.expect("File content desc key not in local cache after fetching");
+		
+		let file_chunk_list: FactorioFileChunkList = rmp_serde::from_slice(&encoded_content_desc)?;
+		
+		world_file_chunk_lists.push(file_chunk_list);
+	}
 	
 	// Reconstruct world, fetching world data chunks along the way
 	
-	chunks_remaining = world_file_chunk_lists.iter()
-		.flat_map(|file| file.content_chunks.iter())
-		.copied()
-		.collect::<Vec<_>>();
+	chunk_fetcher.set_chunks_remaining(
+		world_file_chunk_lists.iter()
+			.flat_map(|file| file.content_chunks.iter())
+			.copied()
+			.collect::<Vec<_>>()
+	);
 	
 	let mut world_reconstructor = WorldReconstructor::new();
 	
 	for (file_desc, file_chunk_list) in world_desc.files.iter().zip(&world_file_chunk_lists) {
 		debug!("Reconstructing file {}", &file_desc.file_name);
 		
-		loop {
-			match world_reconstructor.reconstruct_world_file(file_desc, file_chunk_list, &mut local_cache) {
-				Ok(data_blocks) => {
-					for data in data_blocks {
-						world_data_sender.send(data).await?;
-					}
-					
-					break;
-				}
-				Err(_) => {
-					if chunks_remaining.is_empty() {
-						panic!("Emptied chunk list but reconstructor wants more data");
-					}
-					
-					total_transferred += chunk_batch_fetcher.fetch_chunk_batch(&mut chunks_remaining, &mut local_cache).await?;
-				}
-			}
+		let data_blocks = world_reconstructor.reconstruct_world_file(
+			file_desc,
+			file_chunk_list,
+			&mut chunk_fetcher
+		).await?;
+		
+		for data in data_blocks {
+			world_data_sender.send(data).await?;
 		}
 	}
+	
+	total_transferred += chunk_fetcher.total_transferred();
 	
 	let elapsed = start_time.elapsed();
 	
@@ -354,7 +348,10 @@ async fn transfer_world_data(
 	info!("Reconstructing final data");
 	
 	let last_data = world_reconstructor.finalize_world(
-		&world_desc, world_ready.new_info.world_size as usize, world_ready.new_info.world_crc)?;
+		&world_desc,
+		world_ready.new_info.world_size as usize,
+		world_ready.new_info.world_crc
+	)?;
 	
 	world_data_sender.send(last_data).await?;
 	
