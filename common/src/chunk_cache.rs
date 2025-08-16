@@ -287,7 +287,7 @@ impl RawChunkCache {
 	}
 }
 
-pub const CHUNK_CACHE_COMPRESSION_LEVEL: i32 = 8;
+pub const CHUNK_CACHE_COMPRESSION_LEVEL: i32 = 3;
 
 fn read_chunk_cache(cache: &mut RawChunkCache, cache_path: &Path) -> anyhow::Result<()> {
 	let file = std::fs::File::open(cache_path)?;

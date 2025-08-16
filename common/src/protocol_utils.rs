@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::dedup::ChunkProvider;
 
-const ZSTD_COMPRESSION_LEVEL: i32 = 9;
+const ZSTD_COMPRESSION_LEVEL: i32 = 7;
 const MESSAGE_SIZE_LIMIT: usize = 20_000_000;
 
 pub fn encode_message<T: Serialize>(message: &T) -> anyhow::Result<Bytes> {
