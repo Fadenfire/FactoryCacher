@@ -12,7 +12,8 @@ pub mod chunk_cache;
 pub mod quic;
 pub mod protocol_utils;
 pub mod upnp;
-pub mod chunks;
+
+mod chunker;
 
 pub async fn cli_wrapper<F, Fut>(endpoint: &Endpoint, run: F) -> anyhow::Result<()>
 where

@@ -9,6 +9,7 @@ quinn.workspace = true
 argh.workspace = true
 serde.workspace = true
 bytes.workspace = true
+futures-util.workspace = true
 anyhow.workspace = true
 log.workspace = true
 hex-literal.workspace = true

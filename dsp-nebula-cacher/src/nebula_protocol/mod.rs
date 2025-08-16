@@ -5,9 +5,10 @@ mod dyson_sphere_data;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use anyhow::Context;
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, Bytes};
+use futures_util::{pin_mut, StreamExt};
 use serde::{Deserialize, Serialize};
-use common::chunks::ChunkProvider;
+use common::dedup::{ChunkList, ChunkProvider};
 use common::dedup;
 use common::dedup::ChunkKey;
 use dyson_sphere_data::{DysonSphereDataHeader, DysonSphereDataPacket};
@@ -79,21 +80,13 @@ impl NebulaPacket {
 			Self::DysonSphereData(packet) => packet.reconstruct(chunks).await,
 		}
 	}
-	
-	pub fn required_chunks(&self) -> Vec<ChunkKey> {
-		match self {
-			Self::GlobalGameData(packet) => packet.required_chunks(),
-			Self::FactoryData(packet) => packet.required_chunks(),
-			Self::DysonSphereData(packet) => packet.required_chunks(),
-		}
-	}
 }
 
 fn deconstruct_lz4_data(
 	packet_data: &mut Bytes,
 	data_length: usize,
 	all_chunks: &mut HashMap<ChunkKey, Bytes>
-) -> anyhow::Result<Vec<ChunkKey>> {
+) -> anyhow::Result<ChunkList> {
 	let compressed_data = try_split_to(packet_data, data_length)?;
 	let decompressed_data = decompress_lz4(&compressed_data).context("Decompressing lz4 data")?;
 	
@@ -102,14 +95,14 @@ fn deconstruct_lz4_data(
 	Ok(chunk_list)
 }
 
-async fn reconstruct_lz4_data(chunk_list: &[ChunkKey], chunks: &mut impl ChunkProvider) -> anyhow::Result<Bytes> {
+async fn reconstruct_lz4_data(chunk_list: &ChunkList, chunks: &mut impl ChunkProvider) -> anyhow::Result<Bytes> {
 	let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
 	
-	for &chunk_key in chunk_list {
-		let chunk = chunks.get_chunk(chunk_key).await?
-			.ok_or_else(|| anyhow::anyhow!("Chunk key doesn't exist"))?;
-		
-		encoder.write_all(&chunk)?;
+	let reconstructed_chunks = dedup::reconstruct_data(&chunk_list, chunks);
+	pin_mut!(reconstructed_chunks);
+	
+	while let Some(chunk) = reconstructed_chunks.next().await {
+		encoder.write_all(&chunk?)?;
 	}
 	
 	Ok(encoder.finish()?.into())

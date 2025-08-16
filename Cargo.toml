@@ -18,6 +18,9 @@ anyhow = "1.0"
 log = "0.4"
 simplelog = "0.12"
 time = { version = "0.3", features = ["macros"] }
+async-stream = "0.3"
+futures-core = "0.3"
+futures-util = "0.3"
 hashlink = "0.10"
 hex-literal = "1.0"
 igd-next = { version = "0.16" }

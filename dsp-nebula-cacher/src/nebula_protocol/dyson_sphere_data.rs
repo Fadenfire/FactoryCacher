@@ -1,8 +1,8 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
-use common::dedup::ChunkKey;
+use common::dedup::{ChunkKey, ChunkList};
 use std::collections::HashMap;
-use common::chunks::ChunkProvider;
+use common::dedup::ChunkProvider;
 use crate::nebula_protocol;
 use crate::nebula_protocol::DYSON_SPHERE_DATA_PACKET_ID;
 
@@ -28,7 +28,7 @@ impl DysonSphereDataHeader {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DysonSphereDataPacket {
 	pub star_index: u32,
-	pub data_chunk_list: Vec<ChunkKey>,
+	pub data_chunk_list: ChunkList,
 	pub event_type: u32,
 }
 
@@ -48,10 +48,6 @@ impl DysonSphereDataPacket {
 			data_chunk_list,
 			event_type
 		})
-	}
-	
-	pub fn required_chunks(&self) -> Vec<ChunkKey> {
-		self.data_chunk_list.clone()
 	}
 	
 	pub async fn reconstruct(self, chunks: &mut impl ChunkProvider) -> anyhow::Result<Bytes> {

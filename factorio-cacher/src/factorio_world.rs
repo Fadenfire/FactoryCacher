@@ -3,14 +3,14 @@ use crate::rev_crc;
 use crate::zip_writer::ZipWriter;
 use bytes::{BufMut, Bytes, BytesMut};
 use common::dedup;
-use common::dedup::ChunkKey;
+use common::dedup::{ChunkKey, ChunkList};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
-use anyhow::anyhow;
+use futures_util::{pin_mut, StreamExt};
 use zip::ZipArchive;
-use common::chunks::ChunkProvider;
+use common::dedup::ChunkProvider;
 
 pub const RECONSTRUCT_DEFLATE_LEVEL: u8 = 1;
 
@@ -26,12 +26,7 @@ pub struct FactorioFileDescription {
 	pub file_type: FactorioFileType,
 	pub file_name: String,
 	pub content_size: u64,
-	pub chunk_list_key: ChunkKey,
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct FactorioFileChunkList {
-	pub content_chunks: Vec<ChunkKey>,
+	pub chunk_list: ChunkList,
 }
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Deserialize, Serialize)]
@@ -76,20 +71,13 @@ pub fn chunk_file(
 	file: &FactorioFile,
 	chunks: &mut HashMap<ChunkKey, Bytes>
 ) -> anyhow::Result<FactorioFileDescription> {
-	let content_chunks = dedup::chunk_data(&file.data, chunks);
-	
-	let encoded_chunk_list = rmp_serde::to_vec(&FactorioFileChunkList {
-		content_chunks,
-	})?;
-	
-	let chunk_list_key = ChunkKey(blake3::hash(&encoded_chunk_list));
-	chunks.insert(chunk_list_key, encoded_chunk_list.into());
+	let chunk_list = dedup::chunk_data(&file.data, chunks);
 	
 	Ok(FactorioFileDescription {
 		file_type: file.file_type,
 		file_name: file_name.to_owned(),
 		content_size: file.data.len() as u64,
-		chunk_list_key,
+		chunk_list,
 	})
 }
 
@@ -109,17 +97,15 @@ impl WorldReconstructor {
 	pub async fn reconstruct_world_file(
 		&mut self,
 		file_desc: &FactorioFileDescription,
-		file_chunk_list: &FactorioFileChunkList,
 		chunks: &mut impl ChunkProvider,
 	) -> anyhow::Result<[Bytes; 2]> {
 		let mut buf = Vec::new();
 		
-		for &chunk_key in &file_chunk_list.content_chunks {
-			if let Some(chunk) = chunks.get_chunk(chunk_key).await? {
-				buf.extend_from_slice(&chunk);
-			} else {
-				return Err(anyhow!("Chunk not found"));
-			}
+		let reconstructed_chunks = dedup::reconstruct_data(&file_desc.chunk_list, chunks);
+		pin_mut!(reconstructed_chunks);
+		
+		while let Some(chunk) = reconstructed_chunks.next().await {
+			buf.extend_from_slice(&chunk?);
 		}
 		
 		let file = FactorioFile {

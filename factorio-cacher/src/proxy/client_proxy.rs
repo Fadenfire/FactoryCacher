@@ -1,11 +1,11 @@
 use crate::factorio_protocol::{FactorioPacket, FactorioPacketHeader, PacketType, TransferBlockPacket, TransferBlockRequestPacket, TRANSFER_BLOCK_SIZE};
-use crate::factorio_world::{FactorioFileChunkList, WorldReconstructor};
+use crate::factorio_world::WorldReconstructor;
 use crate::protocol::{Datagram, WorldReadyMessage, UDP_PEER_IDLE_TIMEOUT};
 use crate::proxy::{PacketDirection, UDP_QUEUE_SIZE};
 use anyhow::anyhow;
 use bytes::{Bytes, BytesMut};
 use common::chunk_cache::ChunkCache;
-use common::chunks::ChunkProvider;
+use common::dedup::ChunkProvider;
 use common::protocol_utils::ChunkFetcherProvider;
 use common::{protocol_utils, utils};
 use log::{debug, error, info};
@@ -284,46 +284,23 @@ async fn transfer_world_data(
 	info!("World description: size: {}, crc: {}, file count: {}, total chunks: {}",
 		world_ready.new_info.world_size, world_ready.new_info.world_crc, world_desc.files.len(), world_desc.total_chunks);
 	
-	let mut chunk_fetcher = ChunkFetcherProvider::new(&chunk_cache, &mut send_stream, &mut recv_stream);
-	
-	// Fetch file chunk lists
-	
-	chunk_fetcher.set_chunks_remaining(
-		world_desc.files.iter()
-			.map(|file| file.chunk_list_key)
-			.collect::<Vec<_>>()
-	);
-	
-	info!("Loading chunk lists");
-	
-	let mut world_file_chunk_lists = Vec::new();
-	
-	for file in &world_desc.files {
-		let encoded_content_desc = chunk_fetcher.get_chunk(file.chunk_list_key).await?
-			.expect("File content desc key not in local cache after fetching");
-		
-		let file_chunk_list: FactorioFileChunkList = rmp_serde::from_slice(&encoded_content_desc)?;
-		
-		world_file_chunk_lists.push(file_chunk_list);
-	}
-	
 	// Reconstruct world, fetching world data chunks along the way
 	
-	chunk_fetcher.set_chunks_remaining(
-		world_file_chunk_lists.iter()
-			.flat_map(|file| file.content_chunks.iter())
+	let mut chunk_fetcher = ChunkFetcherProvider::new(&chunk_cache, &mut send_stream, &mut recv_stream);
+	
+	chunk_fetcher.prefetch(
+		world_desc.files.iter()
+			.flat_map(|file| file.chunk_list.chunks.iter())
 			.copied()
-			.collect::<Vec<_>>()
 	);
 	
 	let mut world_reconstructor = WorldReconstructor::new();
 	
-	for (file_desc, file_chunk_list) in world_desc.files.iter().zip(&world_file_chunk_lists) {
+	for file_desc in &world_desc.files {
 		debug!("Reconstructing file {}", &file_desc.file_name);
 		
 		let data_blocks = world_reconstructor.reconstruct_world_file(
 			file_desc,
-			file_chunk_list,
 			&mut chunk_fetcher
 		).await?;
 		

@@ -1,6 +1,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::collections::HashMap;
-use common::chunks::ChunkProvider;
+use futures_util::{pin_mut, StreamExt};
+use common::dedup::{ChunkList, ChunkProvider};
 use common::dedup;
 use common::dedup::ChunkKey;
 use serde::{Deserialize, Serialize};
@@ -29,8 +30,8 @@ impl FactoryDataHeader {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FactoryDataPacket {
 	pub planet_id: u32,
-	pub data_chunk_list: Vec<ChunkKey>,
-	pub terrain_data_chunk_list: Vec<ChunkKey>,
+	pub data_chunk_list: ChunkList,
+	pub terrain_data_chunk_list: ChunkList,
 }
 
 impl FactoryDataPacket {
@@ -53,13 +54,6 @@ impl FactoryDataPacket {
 		})
 	}
 	
-	pub fn required_chunks(&self) -> Vec<ChunkKey> {
-		self.data_chunk_list.iter()
-			.copied()
-			.chain(self.terrain_data_chunk_list.iter().copied())
-			.collect()
-	}
-	
 	pub async fn reconstruct(self, chunks: &mut impl ChunkProvider) -> anyhow::Result<Bytes> {
 		let mut output_data = BytesMut::new();
 		
@@ -73,11 +67,11 @@ impl FactoryDataPacket {
 		
 		let mut terrain_data = Vec::new();
 		
-		for &chunk_key in &self.terrain_data_chunk_list {
-			let chunk = chunks.get_chunk(chunk_key).await?
-				.ok_or_else(|| anyhow::anyhow!("Chunk key doesn't exist"))?;
-			
-			terrain_data.extend_from_slice(&chunk);
+		let reconstructed_chunks = dedup::reconstruct_data(&self.terrain_data_chunk_list, chunks);
+		pin_mut!(reconstructed_chunks);
+		
+		while let Some(chunk) = reconstructed_chunks.next().await {
+			terrain_data.extend_from_slice(&chunk?);
 		}
 		
 		output_data.put_u32_le(terrain_data.len().try_into()?);

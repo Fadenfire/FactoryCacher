@@ -2,7 +2,7 @@ use crate::protocol::{DedupedPacketDescription, InitialConnectionInfo, StartDedu
 use crate::proxy::{copy_ws_to_ws, read_ws_frame};
 use bytes::{Bytes, BytesMut};
 use common::chunk_cache::ChunkCache;
-use common::protocol_utils::{ChunkBatchFetcher, ChunkFetcherProvider};
+use common::protocol_utils::{ChunkFetcherProvider};
 use common::{protocol_utils, utils};
 use fastwebsockets::upgrade::UpgradeFut;
 use fastwebsockets::{Frame, OpCode, Payload, Role, WebSocketRead, WebSocketWrite};
@@ -12,7 +12,6 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use log::{error, info, };
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -206,9 +205,19 @@ async fn reconstruct_packet(
 	// Fetch chunks
 	
 	let mut chunk_fetcher = ChunkFetcherProvider::new(&chunk_cache, &mut send_stream, &mut recv_stream);
-	chunk_fetcher.set_chunks_remaining(packet_desc.packet.required_chunks());
 	
+	// Reconstruct
 	
+	let packet = packet_desc.packet;
+	let reconstructed_data = packet.reconstruct(&mut chunk_fetcher).await?;
+	
+	for fragment in reconstructed_data.chunks(2048) {
+		if outgoing_packets.send(fragment.to_vec().into()).await.is_err() {
+			info!("Peer disconnected while sending reconstructed packet");
+			
+			break;
+		}
+	}
 	
 	let elapsed = start_time.elapsed();
 	
@@ -220,19 +229,6 @@ async fn reconstruct_packet(
 	);
 	
 	chunk_cache.mark_dirty();
-	
-	// Reconstruct
-	
-	let packet = packet_desc.packet;
-	let reconstructed_data = tokio::task::spawn(packet.reconstruct(&mut chunk_fetcher)).await??;
-	
-	for fragment in reconstructed_data.chunks(2048) {
-		if outgoing_packets.send(fragment.to_vec().into()).await.is_err() {
-			info!("Peer disconnected while sending reconstructed packet");
-			
-			break;
-		}
-	}
 	
 	Ok(())
 }

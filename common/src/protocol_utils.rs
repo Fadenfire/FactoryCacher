@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use crate::chunks::ChunkProvider;
+use crate::dedup::ChunkProvider;
 
 const ZSTD_COMPRESSION_LEVEL: i32 = 9;
 const MESSAGE_SIZE_LIMIT: usize = 20_000_000;
@@ -111,7 +111,7 @@ pub struct ChunkFetcherProvider<'a> {
 	recv_stream: &'a mut quinn::RecvStream,
 	
 	local_cache: HashMap<ChunkKey, Bytes>,
-	chunks_remaining: Vec<ChunkKey>,
+	pending_chunks: Vec<ChunkKey>,
 	total_transferred: usize,
 	
 	buffer: BytesMut,
@@ -129,15 +129,11 @@ impl<'a> ChunkFetcherProvider<'a> {
 			recv_stream,
 			
 			local_cache: HashMap::new(),
-			chunks_remaining: Vec::new(),
+			pending_chunks: Vec::new(),
 			total_transferred: 0,
 			
 			buffer: BytesMut::new(),
 		}
-	}
-	
-	pub fn set_chunks_remaining(&mut self, chunks_remaining: Vec<ChunkKey>) {
-		self.chunks_remaining = chunks_remaining;
 	}
 	
 	pub fn total_transferred(&self) -> usize {
@@ -146,14 +142,18 @@ impl<'a> ChunkFetcherProvider<'a> {
 }
 
 impl<'a> ChunkProvider for ChunkFetcherProvider<'a> {
-	async fn get_chunk(&mut self, key: ChunkKey) -> anyhow::Result<Option<Bytes>> {
+	fn prefetch(&mut self, chunks: impl IntoIterator<Item = ChunkKey>) {
+		self.pending_chunks.extend(chunks);
+	}
+	
+	async fn get_chunk(&mut self, key: ChunkKey) -> anyhow::Result<Bytes> {
 		loop {
 			if let Some(chunk) = self.local_cache.get(&key) {
-				return Ok(Some(chunk.clone()));
+				return Ok(chunk.clone());
 			}
 			
-			if self.chunks_remaining.is_empty() {
-				return Ok(None);
+			if self.pending_chunks.is_empty() {
+				panic!("Chunk was requested without being prefetched first");
 			}
 			
 			self.fetch_chunk_batch().await?;
@@ -163,7 +163,7 @@ impl<'a> ChunkProvider for ChunkFetcherProvider<'a> {
 
 impl<'a> ChunkFetcherProvider<'a> {
 	async fn fetch_chunk_batch(&mut self) -> anyhow::Result<()> {
-		let Some(batch) = self.chunk_cache.get_chunks_batched(&mut self.chunks_remaining, &mut self.local_cache, 512).await
+		let Some(batch) = self.chunk_cache.get_chunks_batched(&mut self.pending_chunks, &mut self.local_cache, 512).await
 			else { return Ok(()); };
 		
 		let request_data = encode_message_async(RequestChunksMessage {

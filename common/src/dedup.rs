@@ -1,22 +1,164 @@
-use std::collections::HashMap;
-use bytes::Bytes;
+use crate::chunker::Chunker;
+use async_stream::try_stream;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use futures_core::Stream;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
+
+const MIN_CHUNKS_IN_LIST: usize = 64;
+const AVG_CHUNKS_IN_LIST: u32 = 256;
+const MAX_CHUNKS_IN_LIST: usize = 512;
+
+fn is_split_point(hash: ChunkKey, num_nodes: usize) -> bool {
+	if num_nodes < MIN_CHUNKS_IN_LIST {
+		return false;
+	} else if num_nodes >= MAX_CHUNKS_IN_LIST {
+		return true;
+	}
+	
+	let hash_u32 = u32::from_be_bytes(hash.as_bytes()[0..4].try_into().unwrap());
+	
+	hash_u32 % AVG_CHUNKS_IN_LIST == 0
+}
+
+pub fn chunk_data(data: &[u8], chunks: &mut HashMap<ChunkKey, Bytes>) -> ChunkList {
+	let chunker = Chunker::new(data);
+	
+	let mut tree_levels = Vec::new();
+	// Push on initial leaf node
+	tree_levels.push(ChunkList::new_empty(true));
+	
+	for chunk in chunker {
+		let mut hash = ChunkKey(blake3::hash(chunk));
+		
+		tree_levels[0].chunks.push(hash);
+		chunks.insert(hash, Bytes::copy_from_slice(chunk));
+		
+		let mut level = 0;
+		
+		// While the hash of the node from the previous level is a split point, split the current level
+		// Since we're at a split point for this level, the current node is complete
+		while is_split_point(hash, tree_levels[level].chunks.len()) {
+			let serialized_chunk_list = tree_levels[level].encode();
+			
+			hash = ChunkKey(blake3::hash(&serialized_chunk_list));
+			
+			// Add a new level to the tree if needed
+			if tree_levels.len() <= level + 1 {
+				tree_levels.push(ChunkList::new_empty(false));
+			}
+			
+			// Append the current node to the next level
+			tree_levels[level + 1].chunks.push(hash);
+			
+			// Add the serialized current node to the chunk list
+			chunks.insert(hash, serialized_chunk_list);
+			
+			// Replace the node for the current level with a new fresh node
+			tree_levels[level] = ChunkList::new_empty(tree_levels[level].is_leaf);
+			
+			// Progress to the next level
+			level += 1;
+		}
+	}
+	
+	tree_levels.into_iter().last().unwrap()
+}
+
+pub fn reconstruct_data(
+	chunk_list: &ChunkList,
+	chunk_provider: &mut impl ChunkProvider,
+) -> impl Stream<Item = anyhow::Result<Bytes>> {
+	chunk_provider.prefetch(chunk_list.chunks.iter().copied());
+	
+	try_stream! {
+		for &chunk_key in &chunk_list.chunks {
+			let chunk = chunk_provider.get_chunk(chunk_key).await?;
+			
+			if chunk_list.is_leaf {
+				yield chunk;
+			} else {
+				let child_chunk_list = ChunkList::decode(chunk)?;
+				let child_chunks = Box::pin(reconstruct_data(&child_chunk_list, chunk_provider));
+				
+				for await child_chunk in child_chunks {
+					yield child_chunk?;
+				}
+			}
+		}
+	}
+}
+
+pub trait ChunkProvider {
+	fn prefetch(&mut self, chunks: impl IntoIterator<Item = ChunkKey>);
+	
+	async fn get_chunk(&mut self, key: ChunkKey) -> anyhow::Result<Bytes>;
+}
+
+impl ChunkProvider for HashMap<ChunkKey, Bytes> {
+	fn prefetch(&mut self, _chunks: impl IntoIterator<Item = ChunkKey>) {}
+	
+	async fn get_chunk(&mut self, key: ChunkKey) -> anyhow::Result<Bytes> {
+		let chunk = self.get(&key).expect("No such key").clone();
+		
+		Ok(chunk)
+	}
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkList {
+	pub is_leaf: bool,
+	pub chunks: Vec<ChunkKey>,
+}
+
+impl ChunkList {
+	pub fn new_empty(is_leaf: bool) -> Self {
+		Self {
+			is_leaf,
+			chunks: Vec::new(),
+		}
+	}
+	
+	pub fn decode(mut buf: impl Buf) -> anyhow::Result<Self> {
+		let is_leaf = buf.try_get_u8()? != 0;
+		let chunk_count = buf.try_get_u32()? as usize;
+		
+		let mut chunks = Vec::with_capacity(chunk_count);
+		
+		for _ in 0..chunk_count {
+			let mut hash_bytes = [0u8; blake3::OUT_LEN];
+			buf.try_copy_to_slice(&mut hash_bytes)?;
+			
+			chunks.push(ChunkKey(blake3::Hash::from_bytes(hash_bytes)));
+		}
+		
+		Ok(Self {
+			is_leaf,
+			chunks,
+		})
+	}
+	
+	pub fn encode(&self) -> Bytes {
+		let mut buf = BytesMut::new();
+		
+		buf.put_u8(self.is_leaf as u8);
+		buf.put_u32(self.chunks.len().try_into().expect("ChunkList is too big"));
+		
+		for chunk_key in &self.chunks {
+			buf.put_slice(chunk_key.as_bytes());
+		}
+		
+		buf.freeze()
+	}
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct ChunkKey(pub blake3::Hash);
 
-pub fn chunk_data(data: &[u8], chunks: &mut HashMap<ChunkKey, Bytes>) -> Vec<ChunkKey> {
-	let chunker = Chunker::new(data);
-	let mut chunks_keys = Vec::new();
-	
-	for chunk in chunker {
-		let hash = ChunkKey(blake3::hash(chunk));
-		
-		chunks_keys.push(hash);
-		chunks.insert(hash, chunk.to_vec().into());
+impl ChunkKey {
+	pub fn as_bytes(&self) -> &[u8; 32] {
+		self.0.as_bytes()
 	}
-	
-	chunks_keys
 }
 
 impl<'de> Deserialize<'de> for ChunkKey {
@@ -33,98 +175,6 @@ impl Serialize for ChunkKey {
 	fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
 	where S: Serializer
 	{
-		serializer.serialize_bytes(self.0.as_bytes())
+		serializer.serialize_bytes(self.as_bytes())
 	}
 }
-
-#[derive(Debug, Clone)]
-pub struct RabinKarpHash {
-	hash: u32,
-	window: [u32; Self::WINDOW_SIZE],
-	window_pos: usize,
-}
-
-impl RabinKarpHash {
-	const OFFSET: u32 = 31;
-	const MULT: u32 = 0x08104225;
-	const WINDOW_MULT: u32 = u32::wrapping_pow(Self::MULT, (Self::WINDOW_SIZE as u32) + 1);
-	
-	pub const WINDOW_SIZE: usize = 32;
-	
-	pub fn new() -> Self {
-		Self {
-			hash: 0,
-			window: [0; Self::WINDOW_SIZE],
-			window_pos: 0,
-		}
-	}
-	
-	#[inline]
-	pub fn update(&mut self, added_byte: u8) -> u32 {
-		unsafe {
-			let added = (added_byte as u32).wrapping_add(Self::OFFSET);
-			let removed = self.window.get_unchecked(self.window_pos).wrapping_mul(Self::WINDOW_MULT);
-			
-			self.hash = self.hash.wrapping_add(added).wrapping_mul(Self::MULT).wrapping_sub(removed);
-			
-			*self.window.get_unchecked_mut(self.window_pos) = added;
-			self.window_pos = (self.window_pos + 1) % Self::WINDOW_SIZE;
-			
-			self.hash
-		}
-	}
-	
-	pub fn reset(&mut self) {
-		self.hash = 0;
-		self.window.fill(0);
-		self.window_pos = 0;
-	}
-}
-
-const MIN_CHUNK_SIZE: usize = 1 << 9;
-const MAX_CHUNK_SIZE: usize = 1 << 12;
-const CHUNK_MASK: u32 = (1 << 11) - 1;
-
-pub struct Chunker<'a> {
-	rolling_hash: RabinKarpHash,
-	data: &'a [u8],
-}
-
-impl<'a> Chunker<'a> {
-	pub fn new(data: &'a [u8]) -> Self {
-		Self {
-			rolling_hash: RabinKarpHash::new(),
-			data,
-		}
-	}
-}
-
-impl<'a> Iterator for Chunker<'a> {
-	type Item = &'a [u8];
-	
-	fn next(&mut self) -> Option<Self::Item> {
-		if self.data.is_empty() {
-			return None;
-		}
-		
-		let mut chunk_size = MIN_CHUNK_SIZE.min(self.data.len());
-		
-		for &byte in &self.data[chunk_size..] {
-			let hash = self.rolling_hash.update(byte);
-			
-			chunk_size += 1;
-			
-			if (hash & CHUNK_MASK) == 0 || chunk_size >= MAX_CHUNK_SIZE {
-				break;
-			}
-		}
-		
-		let chunk = &self.data[..chunk_size];
-		
-		self.data = &self.data[chunk_size..];
-		self.rolling_hash.reset();
-		
-		Some(chunk)
-	}
-}
-

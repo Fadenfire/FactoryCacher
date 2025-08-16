@@ -18,4 +18,7 @@ log.workspace = true
 simplelog.workspace = true
 time.workspace = true
 hashlink.workspace = true
+async-stream.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
 igd-next.workspace = true

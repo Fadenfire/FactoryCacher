@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::collections::HashMap;
-use common::chunks::ChunkProvider;
+use common::dedup::{ChunkList, ChunkProvider};
 use common::dedup::ChunkKey;
 use serde::{Deserialize, Serialize};
 use crate::nebula_protocol;
@@ -28,7 +28,7 @@ impl GlobalGameDataHeader {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GlobalGameDataPacket {
 	pub data_type: u8,
-	pub data_chunk_list: Vec<ChunkKey>,
+	pub data_chunk_list: ChunkList,
 }
 
 impl GlobalGameDataPacket {
@@ -44,10 +44,6 @@ impl GlobalGameDataPacket {
 			data_type: header.data_type,
 			data_chunk_list,
 		})
-	}
-	
-	pub fn required_chunks(&self) -> Vec<ChunkKey> {
-		self.data_chunk_list.clone()
 	}
 	
 	pub async fn reconstruct(self, chunks: &mut impl ChunkProvider) -> anyhow::Result<Bytes> {
