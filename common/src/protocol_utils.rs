@@ -79,6 +79,8 @@ pub async fn provide_chunks_as_requested(
 	let mut total_transferred = 0;
 	
 	while let Ok(request_data) = read_message(recv_stream, &mut buf).await {
+		total_transferred += request_data.len();
+		
 		let request: RequestChunksMessage = decode_message_async(request_data).await?;
 		
 		let response = SendChunksMessage {
@@ -92,6 +94,7 @@ pub async fn provide_chunks_as_requested(
 		};
 		
 		let response_data = encode_message_async(response).await?;
+		
 		total_transferred += response_data.len();
 		
 		info!("Sending batch of {} chunks, size: {}B",

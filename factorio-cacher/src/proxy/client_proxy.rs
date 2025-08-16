@@ -5,9 +5,8 @@ use crate::proxy::{PacketDirection, UDP_QUEUE_SIZE};
 use anyhow::anyhow;
 use bytes::{Bytes, BytesMut};
 use common::chunk_cache::ChunkCache;
-use common::dedup::ChunkProvider;
 use common::protocol_utils::ChunkFetcherProvider;
-use common::{protocol_utils, utils};
+use common::{dedup, protocol_utils, utils};
 use log::{debug, error, info};
 use quinn_proto::VarInt;
 use std::collections::{BTreeSet, HashMap};
@@ -257,8 +256,8 @@ async fn transfer_world_data(
 	world_data_sender: mpsc::Sender<Bytes>,
 	chunk_cache: Arc<ChunkCache>,
 ) -> anyhow::Result<()> {
-	let mut total_transferred = 0;
 	let start_time = Instant::now();
+	let mut total_transferred = 0;
 	
 	let mut buf = BytesMut::new();
 	
@@ -288,11 +287,12 @@ async fn transfer_world_data(
 	
 	let mut chunk_fetcher = ChunkFetcherProvider::new(&chunk_cache, &mut send_stream, &mut recv_stream);
 	
-	chunk_fetcher.prefetch(
+	dedup::prefetch_chunks(
 		world_desc.files.iter()
-			.flat_map(|file| file.chunk_list.chunks.iter())
-			.copied()
-	);
+			.map(|file| file.chunk_list.clone())
+			.collect(),
+		&mut chunk_fetcher,
+	).await?;
 	
 	let mut world_reconstructor = WorldReconstructor::new();
 	
@@ -313,11 +313,12 @@ async fn transfer_world_data(
 	
 	let elapsed = start_time.elapsed();
 	
-	info!("Finished receiving world in {}s, total transferred: {}B, original size: {}B, dedup ratio: {:.2}%",
+	info!("Finished receiving world in {}s, total transferred: {}B, original size: {}B, dedup ratio: {:.2}%, avg rate: {}B/s",
 		elapsed.as_secs(),
 		utils::abbreviate_number(total_transferred as u64),
 		utils::abbreviate_number(world_ready.old_info.world_size as u64),
 		(total_transferred as f64 / world_ready.old_info.world_size as f64) * 100.0,
+		utils::abbreviate_number((total_transferred as f64 / elapsed.as_millis() as f64 * 1000.0) as u64),
 	);
 	
 	chunk_cache.mark_dirty();

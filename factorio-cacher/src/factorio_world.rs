@@ -71,7 +71,8 @@ pub fn chunk_file(
 	file: &FactorioFile,
 	chunks: &mut HashMap<ChunkKey, Bytes>
 ) -> anyhow::Result<FactorioFileDescription> {
-	let chunk_list = dedup::chunk_data(&file.data, chunks);
+	let mut chunk_list = dedup::chunk_data(&file.data, chunks);
+	chunk_list = dedup::minimize_chunk_list(chunk_list, chunks);
 	
 	Ok(FactorioFileDescription {
 		file_type: file.file_type,

@@ -4,10 +4,11 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures_core::Stream;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
+use std::mem::swap;
 
-const MIN_CHUNKS_IN_LIST: usize = 64;
-const AVG_CHUNKS_IN_LIST: u32 = 256;
-const MAX_CHUNKS_IN_LIST: usize = 512;
+const MIN_CHUNKS_IN_LIST: usize = 128;
+const AVG_CHUNKS_IN_LIST: u32 = 512;
+const MAX_CHUNKS_IN_LIST: usize = 2048;
 
 fn is_split_point(hash: ChunkKey, num_nodes: usize) -> bool {
 	if num_nodes < MIN_CHUNKS_IN_LIST {
@@ -62,15 +63,78 @@ pub fn chunk_data(data: &[u8], chunks: &mut HashMap<ChunkKey, Bytes>) -> ChunkLi
 		}
 	}
 	
+	// Finish tree
+	
+	for level in 0..(tree_levels.len() - 1) {
+		if tree_levels[level].chunks.is_empty() { continue; }
+		
+		let serialized_chunk_list = tree_levels[level].encode();
+		let hash = ChunkKey(blake3::hash(&serialized_chunk_list));
+		
+		// Append the current node to the next level
+		tree_levels[level + 1].chunks.push(hash);
+		
+		// Add the serialized current node to the chunk list
+		chunks.insert(hash, serialized_chunk_list);
+	}
+	
 	tree_levels.into_iter().last().unwrap()
+}
+
+pub const MINIMIZE_THRESHOLD: usize = 64;
+
+pub fn minimize_chunk_list(chunk_list: ChunkList, chunks: &mut HashMap<ChunkKey, Bytes>) -> ChunkList {
+	if chunk_list.chunks.len() < MINIMIZE_THRESHOLD {
+		return chunk_list;
+	}
+	
+	let serialized_chunk_list = chunk_list.encode();
+	let hash = ChunkKey(blake3::hash(&serialized_chunk_list));
+	
+	chunks.insert(hash, serialized_chunk_list);
+	
+	ChunkList {
+		is_leaf: false,
+		chunks: vec![hash],
+	}
+}
+
+pub async fn prefetch_chunks(
+	chunk_lists: Vec<ChunkList>,
+	chunk_provider: &mut impl ChunkProvider,
+) -> anyhow::Result<()> {
+	let mut current_level = Vec::new();
+	let mut next_level = chunk_lists;
+	
+	while !next_level.is_empty() {
+		swap(&mut current_level, &mut next_level);
+		next_level.clear();
+		
+		chunk_provider.prefetch(
+			current_level.iter()
+				.flat_map(|chunk_list| chunk_list.chunks.iter())
+				.copied()
+		);
+		
+		for chunk_list in current_level.drain(..) {
+			if !chunk_list.is_leaf {
+				for &child_chunk_key in &chunk_list.chunks {
+					let child_chunk = chunk_provider.get_chunk(child_chunk_key).await?;
+					let child_chunk_list = ChunkList::decode(child_chunk)?;
+					
+					next_level.push(child_chunk_list);
+				}
+			}
+		}
+	}
+	
+	Ok(())
 }
 
 pub fn reconstruct_data(
 	chunk_list: &ChunkList,
 	chunk_provider: &mut impl ChunkProvider,
 ) -> impl Stream<Item = anyhow::Result<Bytes>> {
-	chunk_provider.prefetch(chunk_list.chunks.iter().copied());
-	
 	try_stream! {
 		for &chunk_key in &chunk_list.chunks {
 			let chunk = chunk_provider.get_chunk(chunk_key).await?;
@@ -92,7 +156,7 @@ pub fn reconstruct_data(
 pub trait ChunkProvider {
 	fn prefetch(&mut self, chunks: impl IntoIterator<Item = ChunkKey>);
 	
-	async fn get_chunk(&mut self, key: ChunkKey) -> anyhow::Result<Bytes>;
+	fn get_chunk(&mut self, key: ChunkKey) -> impl Future<Output = anyhow::Result<Bytes>>;
 }
 
 impl ChunkProvider for HashMap<ChunkKey, Bytes> {
