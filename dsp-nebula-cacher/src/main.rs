@@ -1,6 +1,7 @@
 mod proxy;
 mod protocol;
 mod nebula_protocol;
+mod lz4_frame_encoder;
 
 use crate::proxy::{client_proxy, server_proxy};
 use argh::FromArgs;
