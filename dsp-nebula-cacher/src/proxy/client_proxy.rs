@@ -224,6 +224,8 @@ async fn reconstruct_packet(
 	
 	packet_desc.packet.reconstruct(&mut chunk_fetcher, &outgoing_fragments).await?;
 	
+	total_transferred += chunk_fetcher.total_transferred();
+	
 	// Done
 	
 	let elapsed = start_time.elapsed();
