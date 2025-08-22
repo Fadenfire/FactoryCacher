@@ -2,9 +2,10 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use common::dedup::{ChunkKey, ChunkList};
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 use common::dedup::ChunkProvider;
-use crate::nebula_protocol;
-use crate::nebula_protocol::DYSON_SPHERE_DATA_PACKET_ID;
+use crate::{lz4_frame_encoder, nebula_protocol};
+use crate::nebula_protocol::{DYSON_SPHERE_DATA_PACKET_ID};
 
 #[derive(Debug, Clone)]
 pub struct DysonSphereDataHeader {
@@ -28,6 +29,7 @@ impl DysonSphereDataHeader {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DysonSphereDataPacket {
 	pub star_index: u32,
+	pub data_uncompressed_length: u64,
 	pub data_chunk_list: ChunkList,
 	pub event_type: u32,
 }
@@ -38,29 +40,35 @@ impl DysonSphereDataPacket {
 		mut packet_data: Bytes,
 		all_chunks: &mut HashMap<ChunkKey, Bytes>
 	) -> anyhow::Result<Self> {
-		let data_chunk_list =
+		let (data_chunk_list, data_uncompressed_length) =
 			nebula_protocol::deconstruct_lz4_data(&mut packet_data, header.data_length as usize, all_chunks)?;
 		
 		let event_type = packet_data.try_get_u32_le()?;
 		
 		Ok(Self {
 			star_index: header.star_index,
+			data_uncompressed_length,
 			data_chunk_list,
 			event_type
 		})
 	}
 	
-	pub async fn reconstruct(self, chunks: &mut impl ChunkProvider) -> anyhow::Result<Bytes> {
-		let mut output_data = BytesMut::new();
+	pub async fn reconstruct(self,
+		chunks: &mut impl ChunkProvider,
+		out_sink: &mpsc::Sender<Bytes>,
+	) -> anyhow::Result<()> {
+		let mut buf = BytesMut::new();
 		
-		let data = nebula_protocol::reconstruct_lz4_data(&self.data_chunk_list, chunks).await?;
+		buf.put_u64_le(DYSON_SPHERE_DATA_PACKET_ID);
+		buf.put_u32_le(self.star_index);
+		buf.put_u32_le(lz4_frame_encoder::framed_size(self.data_uncompressed_length).try_into()?);
+		out_sink.send(buf.split().freeze()).await?;
 		
-		output_data.put_u64_le(DYSON_SPHERE_DATA_PACKET_ID);
-		output_data.put_u32_le(self.star_index);
-		output_data.put_u32_le(data.len().try_into()?);
-		output_data.put(data);
-		output_data.put_u32_le(self.event_type);
+		nebula_protocol::reconstruct_lz4_data(&self.data_chunk_list, chunks, out_sink).await?;
 		
-		Ok(output_data.freeze())
+		buf.put_u32_le(self.event_type);
+		out_sink.send(buf.split().freeze()).await?;
+		
+		Ok(())
 	}
 }

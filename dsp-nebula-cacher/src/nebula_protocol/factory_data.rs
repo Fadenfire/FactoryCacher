@@ -5,7 +5,8 @@ use common::dedup::{ChunkList, ChunkProvider};
 use common::dedup;
 use common::dedup::ChunkKey;
 use serde::{Deserialize, Serialize};
-use crate::nebula_protocol;
+use tokio::sync::mpsc;
+use crate::{lz4_frame_encoder, nebula_protocol};
 use crate::nebula_protocol::FACTORY_DATA_PACKET_ID;
 
 #[derive(Debug, Clone)]
@@ -30,7 +31,9 @@ impl FactoryDataHeader {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FactoryDataPacket {
 	pub planet_id: u32,
+	pub data_uncompressed_length: u64,
 	pub data_chunk_list: ChunkList,
+	pub terrain_data_length: u32,
 	pub terrain_data_chunk_list: ChunkList,
 }
 
@@ -40,7 +43,7 @@ impl FactoryDataPacket {
 		mut packet_data: Bytes,
 		all_chunks: &mut HashMap<ChunkKey, Bytes>
 	) -> anyhow::Result<Self> {
-		let data_chunk_list =
+		let (data_chunk_list, data_uncompressed_length) =
 			nebula_protocol::deconstruct_lz4_data(&mut packet_data, header.data_length as usize, all_chunks)?;
 		
 		let terrain_data_length = packet_data.try_get_u32_le()?;
@@ -49,34 +52,36 @@ impl FactoryDataPacket {
 		
 		Ok(Self {
 			planet_id: header.planet_id,
+			data_uncompressed_length,
 			data_chunk_list,
-			terrain_data_chunk_list
+			terrain_data_length,
+			terrain_data_chunk_list,
 		})
 	}
 	
-	pub async fn reconstruct(self, chunks: &mut impl ChunkProvider) -> anyhow::Result<Bytes> {
-		let mut output_data = BytesMut::new();
+	pub async fn reconstruct(self,
+		chunks: &mut impl ChunkProvider,
+		out_sink: &mpsc::Sender<Bytes>,
+	) -> anyhow::Result<()> {
+		let mut buf = BytesMut::new();
 		
-		output_data.put_u64_le(FACTORY_DATA_PACKET_ID);
-		output_data.put_u32_le(self.planet_id);
+		buf.put_u64_le(FACTORY_DATA_PACKET_ID);
+		buf.put_u32_le(self.planet_id);
+		buf.put_u32_le(lz4_frame_encoder::framed_size(self.data_uncompressed_length).try_into()?);
+		out_sink.send(buf.split().freeze()).await?;
 		
-		let data = nebula_protocol::reconstruct_lz4_data(&self.data_chunk_list, chunks).await?;
+		nebula_protocol::reconstruct_lz4_data(&self.data_chunk_list, chunks, out_sink).await?;
 		
-		output_data.put_u32_le(data.len().try_into()?);
-		output_data.put(data);
-		
-		let mut terrain_data = Vec::new();
+		buf.put_u32_le(self.terrain_data_length);
+		out_sink.send(buf.split().freeze()).await?;
 		
 		let reconstructed_chunks = dedup::reconstruct_data(&self.terrain_data_chunk_list, chunks);
 		pin_mut!(reconstructed_chunks);
 		
 		while let Some(chunk) = reconstructed_chunks.next().await {
-			terrain_data.extend_from_slice(&chunk?);
+			out_sink.send(chunk?).await?;
 		}
 		
-		output_data.put_u32_le(terrain_data.len().try_into()?);
-		output_data.extend_from_slice(&terrain_data);
-		
-		Ok(output_data.freeze())
+		Ok(())
 	}
 }

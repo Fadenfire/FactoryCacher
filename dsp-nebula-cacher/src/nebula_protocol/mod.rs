@@ -2,18 +2,20 @@ mod global_game_data;
 mod factory_data;
 mod dyson_sphere_data;
 
-use std::collections::HashMap;
-use std::io::{Read, Write};
+use crate::lz4_frame_encoder;
 use anyhow::Context;
 use bytes::{Buf, Bytes};
-use futures_util::{pin_mut, StreamExt};
-use serde::{Deserialize, Serialize};
-use common::dedup::{ChunkList, ChunkProvider};
 use common::dedup;
 use common::dedup::ChunkKey;
+use common::dedup::{ChunkList, ChunkProvider};
 use dyson_sphere_data::{DysonSphereDataHeader, DysonSphereDataPacket};
 use factory_data::{FactoryDataHeader, FactoryDataPacket};
+use futures_util::{pin_mut, StreamExt};
 use global_game_data::{GlobalGameDataHeader, GlobalGameDataPacket};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::io::Read;
+use tokio::sync::mpsc;
 
 const GAME_DATA_PACKET_ID: u64 = fnv1_hash(b"NebulaModel.Packets.Session.GlobalGameDataResponse");
 const FACTORY_DATA_PACKET_ID: u64 = fnv1_hash(b"NebulaModel.Packets.Planet.FactoryData");
@@ -73,11 +75,11 @@ pub enum NebulaPacket {
 }
 
 impl NebulaPacket {
-	pub async fn reconstruct(self, chunks: &mut impl ChunkProvider) -> anyhow::Result<Bytes> {
+	pub async fn reconstruct(self, chunks: &mut impl ChunkProvider, out_sink: &mpsc::Sender<Bytes>) -> anyhow::Result<()> {
 		match self {
-			Self::GlobalGameData(packet) => packet.reconstruct(chunks).await,
-			Self::FactoryData(packet) => packet.reconstruct(chunks).await,
-			Self::DysonSphereData(packet) => packet.reconstruct(chunks).await,
+			Self::GlobalGameData(packet) => packet.reconstruct(chunks, out_sink).await,
+			Self::FactoryData(packet) => packet.reconstruct(chunks, out_sink).await,
+			Self::DysonSphereData(packet) => packet.reconstruct(chunks, out_sink).await,
 		}
 	}
 }
@@ -86,26 +88,38 @@ fn deconstruct_lz4_data(
 	packet_data: &mut Bytes,
 	data_length: usize,
 	all_chunks: &mut HashMap<ChunkKey, Bytes>
-) -> anyhow::Result<ChunkList> {
+) -> anyhow::Result<(ChunkList, u64)> {
 	let compressed_data = try_split_to(packet_data, data_length)?;
 	let decompressed_data = decompress_lz4(&compressed_data).context("Decompressing lz4 data")?;
 	
 	let chunk_list = dedup::chunk_data(&decompressed_data, all_chunks);
 	
-	Ok(chunk_list)
+	Ok((chunk_list, decompressed_data.len() as u64))
 }
 
-async fn reconstruct_lz4_data(chunk_list: &ChunkList, chunks: &mut impl ChunkProvider) -> anyhow::Result<Bytes> {
-	let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+async fn reconstruct_lz4_data(
+	chunk_list: &ChunkList,
+	chunks: &mut impl ChunkProvider,
+	out_sink: &mpsc::Sender<Bytes>,
+) -> anyhow::Result<()> {
+	dedup::prefetch_chunks(vec![chunk_list.clone()], chunks).await?;
+	
+	let mut frame_encoder = lz4_frame_encoder::Lz4DeterministicFrameEncoder::new();
 	
 	let reconstructed_chunks = dedup::reconstruct_data(&chunk_list, chunks);
 	pin_mut!(reconstructed_chunks);
 	
 	while let Some(chunk) = reconstructed_chunks.next().await {
-		encoder.write_all(&chunk?)?;
+		let chunk = chunk?;
+		
+		if let Some(fragment) = frame_encoder.add_data(&chunk) {
+			out_sink.send(fragment).await?;
+		}
 	}
 	
-	Ok(encoder.finish()?.into())
+	out_sink.send(frame_encoder.finish()).await?;
+	
+	Ok(())
 }
 
 fn try_split_to(packet_data: &mut Bytes, data_length: usize) -> anyhow::Result<Bytes> {

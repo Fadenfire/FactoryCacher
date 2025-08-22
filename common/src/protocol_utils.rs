@@ -146,7 +146,10 @@ impl<'a> ChunkFetcherProvider<'a> {
 
 impl<'a> ChunkProvider for ChunkFetcherProvider<'a> {
 	fn prefetch(&mut self, chunks: impl IntoIterator<Item = ChunkKey>) {
-		self.pending_chunks.extend(chunks);
+		self.pending_chunks.extend(
+			chunks.into_iter()
+				.filter(|chunk_key| !self.local_cache.contains_key(chunk_key))
+		);
 	}
 	
 	async fn get_chunk(&mut self, key: ChunkKey) -> anyhow::Result<Bytes> {

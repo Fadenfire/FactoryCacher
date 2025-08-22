@@ -133,37 +133,12 @@ where
 	while let Some(frame) = read_ws_frame(&mut ws_read).await? {
 		if matches!(frame.opcode, OpCode::Binary | OpCode::Text) && frame.fin {
 			if let Some(indicator) = StartDedupIndicator::decode(frame.payload.as_ref()) {
-				let (tx, mut rx) = mpsc::channel(16);
-				
-				let connection = connection.clone();
-				let chunk_cache = chunk_cache.clone();
-				
-				tokio::spawn(async move {
-					if let Err(err) = reconstruct_packet(indicator.dedup_id, tx, connection, chunk_cache).await {
-						error!("Error reconstructing packet: {:?}", err);
-					}
-				});
-				
-				let mut first_frame = true;
-				let mut last_bytes: Option<Bytes> = None;
-				
-				while let Some(data) = rx.recv().await {
-					if let Some(last_bytes) = last_bytes.take() {
-						let op_code = if first_frame { OpCode::Binary } else { OpCode::Continuation };
-						
-						ws_write.write_frame(Frame::new(false, op_code, None, Payload::Borrowed(&last_bytes))).await?;
-						
-						first_frame = false;
-					}
-					
-					last_bytes = Some(data);
-				}
-				
-				if let Some(last_bytes) = last_bytes.take() {
-					let op_code = if first_frame { OpCode::Binary } else { OpCode::Continuation };
-					
-					ws_write.write_frame(Frame::new(true, op_code, None, Payload::Borrowed(&last_bytes))).await?;
-				}
+				forward_deduped_fragments(
+					indicator,
+					&mut ws_write,
+					connection.clone(),
+					chunk_cache.clone(),
+				).await?;
 				
 				continue;
 			}
@@ -175,13 +150,55 @@ where
 	Ok(())
 }
 
+async fn forward_deduped_fragments<W>(
+	dedup_indicator: StartDedupIndicator,
+	ws_write: &mut WebSocketWrite<W>,
+	connection: Arc<quinn::Connection>,
+	chunk_cache: Arc<ChunkCache>,
+) -> anyhow::Result<()>
+where
+	W: AsyncWrite + Unpin,
+{
+	let (tx, mut rx) = mpsc::channel(16);
+	
+	tokio::spawn(async move {
+		if let Err(err) = reconstruct_packet(dedup_indicator.dedup_id, tx, connection, chunk_cache).await {
+			error!("Error reconstructing packet: {:?}", err);
+		}
+	});
+	
+	let mut first_frame = true;
+	let mut last_bytes: Option<Bytes> = None;
+	
+	while let Some(data) = rx.recv().await {
+		if let Some(last_bytes) = last_bytes.take() {
+			let op_code = if first_frame { OpCode::Binary } else { OpCode::Continuation };
+			
+			ws_write.write_frame(Frame::new(false, op_code, None, Payload::Borrowed(&last_bytes))).await?;
+			
+			first_frame = false;
+		}
+		
+		last_bytes = Some(data);
+	}
+	
+	if let Some(last_bytes) = last_bytes.take() {
+		let op_code = if first_frame { OpCode::Binary } else { OpCode::Continuation };
+		
+		ws_write.write_frame(Frame::new(true, op_code, None, Payload::Borrowed(&last_bytes))).await?;
+	}
+	
+	Ok(())
+}
+
 async fn reconstruct_packet(
 	dedup_stream_id: u64,
-	outgoing_packets: mpsc::Sender<Bytes>,
+	outgoing_fragments: mpsc::Sender<Bytes>,
 	connection: Arc<quinn::Connection>,
 	chunk_cache: Arc<ChunkCache>,
 ) -> anyhow::Result<()> {
 	let mut buf = BytesMut::new();
+	let start_time = Instant::now();
 	
 	info!("Receiving deduplicated packet");
 	
@@ -193,7 +210,6 @@ async fn reconstruct_packet(
 	// Read desc
 	
 	let mut total_transferred = 0;
-	let start_time = Instant::now();
 	
 	let packet_desc_message_data = protocol_utils::read_message(&mut recv_stream, &mut buf).await?;
 	
@@ -202,22 +218,13 @@ async fn reconstruct_packet(
 	
 	let packet_desc: DedupedPacketDescription = protocol_utils::decode_message_async(packet_desc_message_data).await?;
 	
-	// Fetch chunks
+	// Reconstruct
 	
 	let mut chunk_fetcher = ChunkFetcherProvider::new(&chunk_cache, &mut send_stream, &mut recv_stream);
 	
-	// Reconstruct
+	packet_desc.packet.reconstruct(&mut chunk_fetcher, &outgoing_fragments).await?;
 	
-	let packet = packet_desc.packet;
-	let reconstructed_data = packet.reconstruct(&mut chunk_fetcher).await?;
-	
-	for fragment in reconstructed_data.chunks(2048) {
-		if outgoing_packets.send(fragment.to_vec().into()).await.is_err() {
-			info!("Peer disconnected while sending reconstructed packet");
-			
-			break;
-		}
-	}
+	// Done
 	
 	let elapsed = start_time.elapsed();
 	

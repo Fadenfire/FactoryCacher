@@ -4,7 +4,7 @@ use twox_hash::XxHash32;
 
 const MAX_BLOCK_SIZE: usize = 64_000;
 
-struct Lz4DeterministicFrameEncoder {
+pub struct Lz4DeterministicFrameEncoder {
 	pending_data: BytesMut,
 	buffer: BytesMut,
 	
