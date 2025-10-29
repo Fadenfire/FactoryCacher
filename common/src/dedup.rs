@@ -6,9 +6,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::mem::swap;
 
-const MIN_CHUNKS_IN_LIST: usize = 128;
-const AVG_CHUNKS_IN_LIST: u32 = 512;
-const MAX_CHUNKS_IN_LIST: usize = 2048;
+const MIN_CHUNKS_IN_LIST: usize = 64;
+const AVG_CHUNKS_IN_LIST: u32 = 256;
+const MAX_CHUNKS_IN_LIST: usize = 1024;
 
 fn is_split_point(hash: ChunkKey, num_nodes: usize) -> bool {
 	if num_nodes < MIN_CHUNKS_IN_LIST {
