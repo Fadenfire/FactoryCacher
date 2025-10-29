@@ -287,7 +287,7 @@ async fn transfer_world_data(
 	
 	let mut chunk_fetcher = ChunkFetcherProvider::new(&chunk_cache, &mut send_stream, &mut recv_stream);
 	
-	dedup::prefetch_chunks(
+	dedup::prefetch_metadata_chunks(
 		world_desc.files.iter()
 			.map(|file| file.chunk_list.clone())
 			.collect(),

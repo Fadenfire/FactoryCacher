@@ -102,7 +102,7 @@ async fn reconstruct_lz4_data(
 	chunks: &mut impl ChunkProvider,
 	out_sink: &mpsc::Sender<Bytes>,
 ) -> anyhow::Result<()> {
-	dedup::prefetch_chunks(vec![chunk_list.clone()], chunks).await?;
+	dedup::prefetch_metadata_chunks(vec![chunk_list.clone()], chunks).await?;
 	
 	let mut frame_encoder = lz4_frame_encoder::Lz4DeterministicFrameEncoder::new();
 	

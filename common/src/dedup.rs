@@ -99,7 +99,7 @@ pub fn minimize_chunk_list(chunk_list: ChunkList, chunks: &mut HashMap<ChunkKey,
 	root_chunk_list
 }
 
-pub async fn prefetch_chunks(
+pub async fn prefetch_metadata_chunks(
 	chunk_lists: Vec<ChunkList>,
 	chunk_provider: &mut impl ChunkProvider,
 ) -> anyhow::Result<()> {
