@@ -31,7 +31,7 @@ impl RevCRC {
 		value
 	}
 	
-	pub fn digest(&self, initial_value: u32) -> RevDigest {
+	pub fn digest(&self, initial_value: u32) -> RevDigest<'_> {
 		RevDigest {
 			crc: self,
 			value: initial_value ^ self.algorithm.xorout,

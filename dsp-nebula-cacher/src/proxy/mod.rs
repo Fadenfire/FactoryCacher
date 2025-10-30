@@ -16,7 +16,7 @@ where
 	Ok(())
 }
 
-async fn read_ws_frame<R>(ws_read: &mut WebSocketRead<R>) -> Result<Option<Frame>, WebSocketError>
+async fn read_ws_frame<R>(ws_read: &mut WebSocketRead<R>) -> Result<Option<Frame<'_>>, WebSocketError>
 where
 	R: AsyncRead + Unpin,
 {

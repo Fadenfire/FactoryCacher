@@ -116,7 +116,7 @@ impl ChunkCache {
 		chunks_requested: &mut Vec<ChunkKey>,
 		chunks_out: &mut HashMap<ChunkKey, Bytes>,
 		batch_size: usize,
-	) -> Option<BatchChunkRequest> {
+	) -> Option<BatchChunkRequest<'_>> {
 		let pending_requests = {
 			let mut inner = self.inner.lock().unwrap();
 			
