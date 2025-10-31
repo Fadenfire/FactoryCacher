@@ -56,6 +56,10 @@ struct ClientArgs {
 	#[argh(option, default = "60")]
 	/// how often to try to save the cache in seconds, defaults to 60s
 	cache_save_interval: u64,
+	
+	#[argh(switch)]
+	/// enable UPNP port forwarding
+	upnp: bool,
 }
 
 #[derive(FromArgs)]
@@ -114,6 +118,8 @@ async fn run_client(endpoint: &Endpoint, server_address: SocketAddr, args: &Clie
 	).await?;
 	
 	info!("Listening on {}", listen_address);
+	
+	let _upnp_port_mapping = if args.upnp { Some(upnp::open_port(args.port)?) } else { None };
 	
 	client_proxy::run_client_proxy(socket.clone(), quic_connection.clone(), chunk_cache.clone()).await?;
 	
