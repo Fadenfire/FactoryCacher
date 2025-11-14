@@ -19,6 +19,8 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+const WORLD_ESTIMATE_MULTIPLIER: f64 = 1.5;
+
 pub async fn run_server_proxy(
 	connection: Arc<quinn::Connection>,
 	factorio_addr: SocketAddr,
@@ -250,7 +252,7 @@ impl ServerProxyState {
 	) {
 		info!("Got world info: {:?}", world_info);
 		
-		let estimated_reconstructed_world_size = world_info.world_size * 2;
+		let estimated_reconstructed_world_size = (world_info.world_size as f64 * WORLD_ESTIMATE_MULTIPLIER) as u32;
 		
 		info!("Estimated reconstructed world size: {}", estimated_reconstructed_world_size);
 		

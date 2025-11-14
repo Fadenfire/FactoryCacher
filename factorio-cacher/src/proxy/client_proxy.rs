@@ -311,16 +311,6 @@ async fn transfer_world_data(
 	
 	total_transferred += chunk_fetcher.total_transferred();
 	
-	let elapsed = start_time.elapsed();
-	
-	info!("Finished receiving world in {}s, total transferred: {}B, original size: {}B, dedup ratio: {:.2}%, avg rate: {}B/s",
-		elapsed.as_secs(),
-		utils::abbreviate_number(total_transferred as u64),
-		utils::abbreviate_number(world_ready.old_info.world_size as u64),
-		(total_transferred as f64 / world_ready.old_info.world_size as f64) * 100.0,
-		utils::abbreviate_number((total_transferred as f64 / elapsed.as_millis() as f64 * 1000.0) as u64),
-	);
-	
 	chunk_cache.mark_dirty();
 	
 	info!("Reconstructing final data");
@@ -332,6 +322,16 @@ async fn transfer_world_data(
 	)?;
 	
 	world_data_sender.send(last_data).await?;
+	
+	let elapsed = start_time.elapsed();
+	
+	info!("Finished receiving world in {}s, total transferred: {}B, original size: {}B, dedup ratio: {:.2}%, avg rate: {}B/s",
+		elapsed.as_secs(),
+		utils::abbreviate_number(total_transferred as u64),
+		utils::abbreviate_number(world_ready.old_info.world_size as u64),
+		(total_transferred as f64 / world_ready.old_info.world_size as f64) * 100.0,
+		utils::abbreviate_number((total_transferred as f64 / elapsed.as_millis() as f64 * 1000.0) as u64),
+	);
 	
 	Ok(())
 }

@@ -2,13 +2,14 @@ use crate::factorio_protocol::{FACTORIO_CRC, FACTORIO_REV_CRC, TRANSFER_BLOCK_SI
 use crate::rev_crc;
 use crate::zip_writer::ZipWriter;
 use bytes::{BufMut, Bytes, BytesMut};
-use common::dedup;
+use common::{dedup, utils};
 use common::dedup::{ChunkKey, ChunkList};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use futures_util::{pin_mut, StreamExt};
+use log::info;
 use zip::ZipArchive;
 use common::dedup::ChunkProvider;
 
@@ -138,6 +139,12 @@ impl WorldReconstructor {
 			return Err(anyhow::anyhow!("Reconstructed world size ({}) won't fit inside of estimated size ({})",
 				total_size, target_world_size));
 		}
+		
+		info!("Original world size estimation: {}B, reconstructed world size: {}B, overestimated by {:.2}%",
+			utils::abbreviate_number(target_world_size as u64),
+			utils::abbreviate_number(total_size as u64),
+			(target_world_size as f64 / total_size as f64 - 1.0) * 100.0,
+		);
 		
 		// Add padding to match target world size
 		let mut output = BytesMut::zeroed(target_world_size - total_size);
