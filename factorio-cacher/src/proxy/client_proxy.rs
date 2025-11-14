@@ -256,7 +256,6 @@ async fn transfer_world_data(
 	world_data_sender: mpsc::Sender<Bytes>,
 	chunk_cache: Arc<ChunkCache>,
 ) -> anyhow::Result<()> {
-	let start_time = Instant::now();
 	let mut total_transferred = 0;
 	
 	let mut buf = BytesMut::new();
@@ -272,6 +271,8 @@ async fn transfer_world_data(
 		}
 		Err(err) => return Err(err.into()),
 	};
+	
+	let start_time = Instant::now();
 	
 	total_transferred += world_ready_message_data.len();
 	
