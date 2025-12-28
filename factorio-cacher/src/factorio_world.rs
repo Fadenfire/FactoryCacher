@@ -100,7 +100,7 @@ impl WorldReconstructor {
 		&mut self,
 		file_desc: &FactorioFileDescription,
 		chunks: &mut impl ChunkProvider,
-	) -> anyhow::Result<[Bytes; 2]> {
+	) -> anyhow::Result<Bytes> {
 		let mut buf = Vec::new();
 		
 		let reconstructed_chunks = dedup::reconstruct_data(&file_desc.chunk_list, chunks);
@@ -116,12 +116,17 @@ impl WorldReconstructor {
 		};
 		
 		let file_data = encode_factorio_file(&file);
-		let header = self.zip_writer.encode_file_header(&file_desc.file_name, &file_data);
 		
-		self.crc_hasher.update(&header);
-		self.crc_hasher.update(&file_data);
+		let deflate_level = match file_desc.file_type {
+			FactorioFileType::Normal => Some(RECONSTRUCT_DEFLATE_LEVEL),
+			FactorioFileType::Zlib => None,
+		};
 		
-		Ok([header, file_data.into_owned().into()])
+		let zip_entry_data = self.zip_writer.encode_file(&file_desc.file_name, &file_data, deflate_level);
+		
+		self.crc_hasher.update(&zip_entry_data);
+		
+		Ok(zip_entry_data)
 	}
 	
 	pub fn finalize_world(mut self,

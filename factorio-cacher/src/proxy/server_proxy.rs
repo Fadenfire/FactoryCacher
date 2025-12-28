@@ -19,7 +19,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-const WORLD_ESTIMATE_MULTIPLIER: f64 = 1.5;
+const WORLD_ESTIMATE_MULTIPLIER: f64 = 1.6;
 
 pub async fn run_server_proxy(
 	connection: Arc<quinn::Connection>,

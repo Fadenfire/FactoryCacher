@@ -300,14 +300,12 @@ async fn transfer_world_data(
 	for file_desc in &world_desc.files {
 		debug!("Reconstructing file {}", &file_desc.file_name);
 		
-		let data_blocks = world_reconstructor.reconstruct_world_file(
+		let data = world_reconstructor.reconstruct_world_file(
 			file_desc,
 			&mut chunk_fetcher
 		).await?;
 		
-		for data in data_blocks {
-			world_data_sender.send(data).await?;
-		}
+		world_data_sender.send(data).await?;
 	}
 	
 	total_transferred += chunk_fetcher.total_transferred();
