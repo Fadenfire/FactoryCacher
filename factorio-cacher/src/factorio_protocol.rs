@@ -1,7 +1,7 @@
 use crate::rev_crc::RevCRC;
-use common::utils::BufExt;
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
+use common::utils::BufExt;
 use crc::Crc;
 use serde::{Deserialize, Serialize};
 
@@ -40,38 +40,71 @@ impl Into<u8> for PacketType {
 	}
 }
 
+#[derive(Debug)]
 pub struct FactorioPacketHeader {
 	pub packet_type: PacketType,
-	pub is_fragmented: bool,
+	pub fragmentation: Option<PacketFragmentationInfo>,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct PacketFragmentationInfo {
 	pub is_last_fragment: bool,
+	pub message_id: u16,
+	pub fragment_id: Option<u16>,
 }
 
 impl FactorioPacketHeader {
 	pub fn new_unfragmented(packet_type: PacketType) -> Self {
 		Self {
 			packet_type,
-			is_fragmented: false,
-			is_last_fragment: false,
+			fragmentation: None,
 		}
 	}
 	
 	pub fn decode(mut data: Bytes) -> Result<(Self, Bytes), TryGetError> {
 		let flags = data.try_get_u8()?;
 		
+		let packet_type = PacketType::from(flags & 0b00011111);
+		let is_fragmented = (flags & 0b01000000) != 0;
+		let is_last_fragment = (flags & 0b10000000) != 0;
+		
+		let mut fragmentation = None;
+		
+		if is_fragmented || is_last_fragment {
+			let message_id = data.try_get_u16_le()?;
+			
+			let fragment_id = if is_fragmented {
+				Some(data.try_get_factorio_varint16()?)
+			} else {
+				None
+			};
+			
+			if (message_id & 0x8000) != 0 {
+				// Skip confirm array
+				let len = data.try_get_u32_le()?;
+				data.try_advance(len as usize)?;
+			}
+			
+			fragmentation = Some(PacketFragmentationInfo {
+				is_last_fragment,
+				message_id: message_id & 0x7FFF,
+				fragment_id,
+			})
+		}
+		
 		let packet = Self {
-			packet_type: PacketType::from(flags & 0b00011111),
-			is_fragmented: (flags & 0b01000000) != 0,
-			is_last_fragment: (flags & 0b10000000) != 0,
+			packet_type,
+			fragmentation,
 		};
 		
 		Ok((packet, data))
 	}
 	
 	pub fn encode(&self, buf: &mut BytesMut) {
-		let mut flags: u8 = self.packet_type.into();
-		if self.is_fragmented { flags |= 0b01000000; }
-		if self.is_last_fragment { flags |= 0b10000000; }
+		assert!(self.fragmentation.is_none(), "Encoding fragmented packets is unsupported");
 		
+		let flags: u8 = self.packet_type.into();
 		buf.put_u8(flags);
 	}
 }
@@ -157,6 +190,8 @@ impl ServerToClientHeartbeatPacket {
 	pub fn decode(mut data: Bytes) -> Result<Self, TryGetError> {
 		let flags = HeartbeatFlags::from_bits_retain(data.try_get_u8()?);
 		data.try_get_u32_le()?; // Seq number
+		
+		// println!("Got heartbeat, seq num: {}, flags: {:?}, flags byte: {}", q, flags, flags.bits());
 		
 		Ok(Self {
 			flags,

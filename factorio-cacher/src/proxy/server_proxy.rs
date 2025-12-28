@@ -181,7 +181,19 @@ impl ServerProxyState {
 				if let Ok((header, msg_data)) =
 					FactorioPacketHeader::decode(in_packet_data.clone())
 				{
-					if header.packet_type == PacketType::ServerToClientHeartbeat {
+					// use std::sync::atomic::AtomicUsize;
+					// static PACKET_COUNTER: AtomicUsize = AtomicUsize::new(0);
+					// let id = PACKET_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+					//
+					// std::fs::write(format!("packets/packet-{}.bin", id), &msg_data).unwrap();
+					//
+					// println!("Got packet (id {}) {:?}", id, header);
+					
+					if
+						header.packet_type == PacketType::ServerToClientHeartbeat &&
+						// Only try to decode if the packet is either not fragmented, or it's the first fragment
+						header.fragmentation.is_none_or(|frag| frag.fragment_id == Some(0))
+					{
 						let result = ServerToClientHeartbeatPacket::decode(msg_data)
 							.and_then(ServerToClientHeartbeatPacket::try_decode_map_ready);
 						

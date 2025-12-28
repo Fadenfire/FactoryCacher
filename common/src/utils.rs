@@ -3,6 +3,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
 pub trait BufExt {
 	fn try_get_factorio_varint32(&mut self) -> Result<u32, TryGetError>;
+	fn try_get_factorio_varint16(&mut self) -> Result<u16, TryGetError>;
+	fn try_advance(&mut self, len: usize) -> Result<(), TryGetError>;
 }
 
 impl<T: Buf> BufExt for T {
@@ -13,6 +15,29 @@ impl<T: Buf> BufExt for T {
 			self.try_get_u32_le()
 		} else {
 			Ok(byte as u32)
+		}
+	}
+	
+	fn try_get_factorio_varint16(&mut self) -> Result<u16, TryGetError> {
+		let byte = self.try_get_u8()?;
+		
+		if byte == 0xFF {
+			self.try_get_u16_le()
+		} else {
+			Ok(byte as u16)
+		}
+	}
+	
+	fn try_advance(&mut self, len: usize) -> Result<(), TryGetError> {
+		if self.remaining() < len {
+			Err(TryGetError {
+				requested: len,
+				available: self.remaining(),
+			})
+		} else {
+			self.advance(len);
+			
+			Ok(())
 		}
 	}
 }
