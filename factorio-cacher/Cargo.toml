@@ -16,7 +16,7 @@ log.workspace = true
 
 common = { path = "../common" }
 
-zip = { version = "6.0", default-features = false, features = ["deflate", "zstd"] }
+zip = { version = "7.0", default-features = false, features = ["deflate", "zstd"] }
 miniz_oxide = { version = "0.8.0", features = ["std"] }
 bitflags = "2.0"
 crc = "3.0"
