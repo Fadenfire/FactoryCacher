@@ -11,7 +11,7 @@ use quinn_proto::VarInt;
 use std::collections::{BTreeSet, HashMap};
 use std::mem;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
@@ -23,7 +23,7 @@ const WORLD_ESTIMATE_MULTIPLIER: f64 = 1.6;
 
 pub async fn run_server_proxy(
 	connection: Arc<quinn::Connection>,
-	factorio_addr: SocketAddr,
+	factorio_address_cell: Arc<Mutex<SocketAddr>>,
 ) -> anyhow::Result<()> {
 	let mut outgoing_queues: HashMap<VarInt, mpsc::Sender<Bytes>> = HashMap::new();
 	
@@ -39,6 +39,7 @@ pub async fn run_server_proxy(
             result = connection.accept_bi() => {
                 let (send_stream, mut recv_stream) = result?;
                 let peer_id: VarInt = recv_stream.read_u32_le().await?.into();
+				let factorio_addr = *factorio_address_cell.lock().unwrap();
 
 				info!("New peer with id {}", peer_id);
 				

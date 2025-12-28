@@ -5,7 +5,7 @@ use log::info;
 use quinn::Endpoint;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::net::{lookup_host, UdpSocket};
 
 mod factorio_protocol;
@@ -14,6 +14,7 @@ mod protocol;
 mod zip_writer;
 mod factorio_world;
 mod rev_crc;
+mod lan_discovery;
 
 #[derive(FromArgs)]
 /// Factorio cacher
@@ -81,6 +82,10 @@ struct ServerArgs {
 	#[argh(switch)]
 	/// enable UPNP port forwarding
 	upnp: bool,
+	
+	#[argh(switch)]
+	/// enable auto LAN port discovery
+	auto_lan: bool,
 }
 
 #[tokio::main()]
@@ -136,7 +141,13 @@ async fn subcommand_server(args: ServerArgs) {
 	
 	let _upnp_port_mapping = if args.upnp { Some(upnp::open_port(args.port).unwrap()) } else { None };
 	
+	let factorio_address_cell = Arc::new(Mutex::new(factorio_address));
+	
+	if args.auto_lan {
+		tokio::task::spawn(lan_discovery::lan_discovery_task(factorio_address_cell.clone()));
+	}
+	
 	common::cli_wrapper(&endpoint, || {
-		common::run_server(&endpoint, move |conn| server_proxy::run_server_proxy(conn, factorio_address))
+		common::run_server(&endpoint, move |conn| server_proxy::run_server_proxy(conn, factorio_address_cell.clone()))
 	}).await.unwrap();
 }
