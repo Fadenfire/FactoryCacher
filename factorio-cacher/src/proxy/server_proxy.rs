@@ -22,7 +22,7 @@ use tokio::time::Instant;
 const WORLD_ESTIMATE_MULTIPLIER: f64 = 1.6;
 
 pub async fn run_server_proxy(
-	connection: Arc<quinn::Connection>,
+	connection: quinn::Connection,
 	factorio_address_cell: Arc<Mutex<SocketAddr>>,
 ) -> anyhow::Result<()> {
 	let mut outgoing_queues: HashMap<VarInt, mpsc::Sender<Bytes>> = HashMap::new();
@@ -72,7 +72,7 @@ pub async fn run_server_proxy(
 }
 
 struct ProxyServerArgs {
-	connection: Arc<quinn::Connection>,
+	connection: quinn::Connection,
 	peer_id: VarInt,
 	
 	socket: UdpSocket,

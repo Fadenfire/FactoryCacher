@@ -42,7 +42,7 @@ where
 
 pub async fn run_server<F, Fut>(endpoint: &Endpoint, handle_conn: F) -> anyhow::Result<()>
 where
-	F: Fn(Arc<quinn::Connection>) -> Fut + Clone + Send + 'static,
+	F: Fn(quinn::Connection) -> Fut + Clone + Send + 'static,
 	Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
 {
 	info!("Started");
@@ -56,7 +56,7 @@ where
 			
 			info!("Client from {:?} connected", client_address);
 			
-			if let Err(err) = handle_conn(Arc::new(connection)).await {
+			if let Err(err) = handle_conn(connection).await {
 				error!("Error running server: {:?}", err);
 			}
 			

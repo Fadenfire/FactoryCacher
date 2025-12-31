@@ -22,7 +22,7 @@ use tokio::try_join;
 
 type PendingDedupStreamsMap = HashMap<u64, oneshot::Sender<(quinn::SendStream, quinn::RecvStream)>>;
 
-pub async fn run_server_proxy(connection: Arc<quinn::Connection>, dsp_addr: SocketAddr) -> anyhow::Result<()> {
+pub async fn run_server_proxy(connection: quinn::Connection, dsp_addr: SocketAddr) -> anyhow::Result<()> {
 	let pending_dedup_streams: Arc<Mutex<PendingDedupStreamsMap>> = Arc::new(Mutex::new(HashMap::new()));
 	
 	loop {
