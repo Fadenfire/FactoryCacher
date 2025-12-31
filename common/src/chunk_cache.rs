@@ -51,21 +51,21 @@ impl ChunkCache {
 		})
 	}
 	
-	pub fn start_writer(self: &Arc<Self>, cache_path: PathBuf, interval: Duration) {
+	pub fn start_writer(self: &Arc<Self>, cache_path: PathBuf, interval: Duration, compression_level: i32) {
 		let arc_self = Arc::clone(self);
 		
 		tokio::spawn(async move {
 			loop {
 				tokio::time::sleep(interval).await;
 				
-				if let Err(err) = arc_self.try_save(cache_path.clone()).await {
+				if let Err(err) = arc_self.try_save(cache_path.clone(), compression_level).await {
 					error!("Failed to save chunk cache: {}", err);
 				}
 			}
 		});
 	}
 	
-	async fn try_save(&self, cache_path: PathBuf) -> anyhow::Result<()> {
+	async fn try_save(&self, cache_path: PathBuf, compression_level: i32) -> anyhow::Result<()> {
 		let total_size;
 		
 		let raw_cache = {
@@ -88,7 +88,7 @@ impl ChunkCache {
 		let compressed_size = tokio::task::spawn_blocking(move || -> anyhow::Result<u64> {
 			let temp_path = cache_path.with_extension("tmp");
 			
-			write_chunk_cache(&raw_cache, &temp_path)?;
+			write_chunk_cache(&raw_cache, &temp_path, compression_level)?;
 			
 			let written_size = std::fs::metadata(&temp_path)?.len();
 			std::fs::rename(&temp_path, &cache_path)?;
@@ -287,8 +287,6 @@ impl RawChunkCache {
 	}
 }
 
-pub const CHUNK_CACHE_COMPRESSION_LEVEL: i32 = 3;
-
 fn read_chunk_cache(cache: &mut RawChunkCache, cache_path: &Path) -> anyhow::Result<()> {
 	let file = std::fs::File::open(cache_path)?;
 	let mut decoder = zstd::Decoder::new(file)?;
@@ -327,10 +325,10 @@ fn read_chunk_cache(cache: &mut RawChunkCache, cache_path: &Path) -> anyhow::Res
 	Ok(())
 }
 
-fn write_chunk_cache(cache: &RawChunkCache, cache_path: &Path) -> anyhow::Result<()> {
+fn write_chunk_cache(cache: &RawChunkCache, cache_path: &Path, compression_level: i32) -> anyhow::Result<()> {
 	let file = std::fs::File::create(cache_path)?;
 	let writer = BufWriter::new(file);
-	let mut encoder = zstd::Encoder::new(writer, CHUNK_CACHE_COMPRESSION_LEVEL)?;
+	let mut encoder = zstd::Encoder::new(writer, compression_level)?;
 	
 	encoder.write_all(&u32::try_from(cache.len())
 		.expect("Chunk count wouldn't fit into a u32")

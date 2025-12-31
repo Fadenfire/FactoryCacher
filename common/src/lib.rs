@@ -75,7 +75,7 @@ pub async fn create_chunk_cache(cache_options: CacheOptions) -> anyhow::Result<A
 		info!("Loading cache from {}", cache_path.display());
 		
 		let compressed_size = tokio::fs::metadata(&cache_path).await?.len();
-		chunk_cache = Arc::new(ChunkCache::load_from_file(cache_options.cache_limit, cache_path.clone()).await?);
+		chunk_cache = Arc::new(ChunkCache::load_from_file(cache_options.size_limit, cache_path.clone()).await?);
 		
 		info!(
 			"Loaded {} chunks ({}B, {}B compressed) from the cache",
@@ -84,12 +84,16 @@ pub async fn create_chunk_cache(cache_options: CacheOptions) -> anyhow::Result<A
 			utils::abbreviate_number(compressed_size)
 		);
 	} else {
-		chunk_cache = Arc::new(ChunkCache::new(cache_options.cache_limit));
+		chunk_cache = Arc::new(ChunkCache::new(cache_options.size_limit));
 	}
 	
-	info!("The cache has a limit of {}B", utils::abbreviate_number(cache_options.cache_limit));
+	info!("The cache has a limit of {}B", utils::abbreviate_number(cache_options.size_limit));
 	
-	chunk_cache.start_writer(cache_path, Duration::from_secs(cache_options.cache_save_interval));
+	chunk_cache.start_writer(
+		cache_path,
+		Duration::from_secs(cache_options.save_interval),
+		cache_options.compression_level
+	);
 	
 	Ok(chunk_cache)
 }

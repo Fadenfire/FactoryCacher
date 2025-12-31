@@ -3,8 +3,9 @@ use std::path::PathBuf;
 #[derive(Debug)]
 pub struct CacheOptions {
 	pub cache_path: Option<PathBuf>,
-	pub cache_limit: u64,
-	pub cache_save_interval: u64,
+	pub size_limit: u64,
+	pub save_interval: u64,
+	pub compression_level: i32,
 }
 
 #[macro_export]
@@ -26,15 +27,20 @@ macro_rules! client_args {
 			
 			#[argh(option, default = "60")]
 			/// how often to try to save the cache in seconds, defaults to 60s
-			cache_save_interval: u64,
+			cache_interval: u64,
+			
+			#[argh(option, default = "3")]
+			/// zstd compression level used for the on-disk chunk cache, must be between 1-22, defaults to 3
+			cache_compression: u32,
 		}
 		
 		impl ClientArgs {
 			pub fn cache_options(&self) -> common::cli_args::CacheOptions {
 				common::cli_args::CacheOptions {
 					cache_path: self.cache_path.clone(),
-					cache_limit: self.cache_limit,
-					cache_save_interval: self.cache_save_interval,
+					size_limit: self.cache_limit,
+					save_interval: self.cache_interval,
+					compression_level: self.cache_compression as i32,
 				}
 			}
 		}
