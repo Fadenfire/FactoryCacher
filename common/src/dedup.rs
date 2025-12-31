@@ -6,9 +6,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::mem::swap;
 
-const MIN_CHUNKS_IN_LIST: usize = 64;
-const AVG_CHUNKS_IN_LIST: u32 = 256;
-const MAX_CHUNKS_IN_LIST: usize = 1024;
+const MIN_CHUNKS_IN_LIST: usize = 32;
+const AVG_CHUNKS_IN_LIST: u32 = 128;
+const MAX_CHUNKS_IN_LIST: usize = 512;
 
 fn is_split_point(hash: ChunkKey, num_nodes: usize) -> bool {
 	if num_nodes < MIN_CHUNKS_IN_LIST {
@@ -103,11 +103,10 @@ pub async fn prefetch_metadata_chunks(
 	chunk_lists: Vec<ChunkList>,
 	chunk_provider: &mut impl ChunkProvider,
 ) -> anyhow::Result<()> {
-	let mut current_level = Vec::new();
-	let mut next_level = chunk_lists;
+	let mut current_level = chunk_lists;
+	let mut next_level = Vec::new();
 	
-	while !next_level.is_empty() {
-		swap(&mut current_level, &mut next_level);
+	while !current_level.is_empty() {
 		next_level.clear();
 		
 		chunk_provider.prefetch(
@@ -126,6 +125,8 @@ pub async fn prefetch_metadata_chunks(
 				}
 			}
 		}
+		
+		swap(&mut current_level, &mut next_level);
 	}
 	
 	Ok(())
