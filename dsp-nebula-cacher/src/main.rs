@@ -5,7 +5,7 @@ mod lz4_frame_encoder;
 
 use crate::proxy::{client_proxy, server_proxy};
 use argh::FromArgs;
-use common::{quic, upnp};
+use common::{cli_args, quic, upnp};
 use log::info;
 use quinn::Endpoint;
 use std::net::Ipv4Addr;
@@ -27,10 +27,7 @@ enum Subcommand {
 	Server(ServerArgs),
 }
 
-#[derive(FromArgs)]
-/// Run the client
-#[argh(subcommand, name = "client")]
-struct ClientArgs {
+cli_args::client_args! {
 	#[argh(option, short = 'p', default = "60120")]
 	/// port that DSP clients use to connect, defaults to 60120
 	port: u16,
@@ -42,24 +39,9 @@ struct ClientArgs {
 	#[argh(positional)]
 	/// dsp-nebula-cacher server address in host:port form
 	server_address: String,
-	
-	#[argh(option, short = 'c')]
-	/// location of cache file, defaults to 'persistent-cache' in the CWD
-	cache_path: Option<PathBuf>,
-	
-	#[argh(option, default = "500_000_000")]
-	/// max size of the chunk cache, defaults to 500MB
-	cache_limit: u64,
-	
-	#[argh(option, default = "60")]
-	/// how often to try to save the cache in seconds, defaults to 60s
-	cache_save_interval: u64,
 }
 
-#[derive(FromArgs)]
-/// Run the server
-#[argh(subcommand, name = "server")]
-struct ServerArgs {
+cli_args::server_args! {
 	#[argh(option, short = 'p', default = "60130")]
 	/// port that dsp-nebula-cacher clients use to connect, defaults to 60130
 	port: u16,
@@ -105,11 +87,7 @@ async fn run_client(endpoint: &Endpoint, server_address: SocketAddr, args: &Clie
 	
 	info!("Connected");
 	
-	let chunk_cache = common::create_chunk_cache(
-		&args.cache_path,
-		args.cache_limit,
-		args.cache_save_interval
-	).await?;
+	let chunk_cache = common::create_chunk_cache(args.cache_options()).await?;
 	
 	info!("Listening on {}", listen_address);
 	

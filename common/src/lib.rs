@@ -1,7 +1,7 @@
 use crate::chunk_cache::ChunkCache;
+use crate::cli_args::CacheOptions;
 use log::{error, info};
 use quinn::Endpoint;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
@@ -12,6 +12,7 @@ pub mod chunk_cache;
 pub mod quic;
 pub mod protocol_utils;
 pub mod upnp;
+pub mod cli_args;
 
 mod chunker;
 
@@ -64,12 +65,8 @@ where
 	}
 }
 
-pub async fn create_chunk_cache(
-	cache_path: &Option<PathBuf>,
-	cache_limit: u64,
-	cache_save_interval: u64,
-) -> anyhow::Result<Arc<ChunkCache>> {
-	let cache_path = cache_path.clone()
+pub async fn create_chunk_cache(cache_options: CacheOptions) -> anyhow::Result<Arc<ChunkCache>> {
+	let cache_path = cache_options.cache_path
 		.unwrap_or_else(|| std::path::absolute("persistent-cache").unwrap());
 	
 	let chunk_cache;
@@ -78,7 +75,7 @@ pub async fn create_chunk_cache(
 		info!("Loading cache from {}", cache_path.display());
 		
 		let compressed_size = tokio::fs::metadata(&cache_path).await?.len();
-		chunk_cache = Arc::new(ChunkCache::load_from_file(cache_limit, cache_path.clone()).await?);
+		chunk_cache = Arc::new(ChunkCache::load_from_file(cache_options.cache_limit, cache_path.clone()).await?);
 		
 		info!(
 			"Loaded {} chunks ({}B, {}B compressed) from the cache",
@@ -87,12 +84,12 @@ pub async fn create_chunk_cache(
 			utils::abbreviate_number(compressed_size)
 		);
 	} else {
-		chunk_cache = Arc::new(ChunkCache::new(cache_limit));
+		chunk_cache = Arc::new(ChunkCache::new(cache_options.cache_limit));
 	}
 	
-	info!("The cache has a limit of {}B", utils::abbreviate_number(cache_limit));
+	info!("The cache has a limit of {}B", utils::abbreviate_number(cache_options.cache_limit));
 	
-	chunk_cache.start_writer(cache_path, Duration::from_secs(cache_save_interval));
+	chunk_cache.start_writer(cache_path, Duration::from_secs(cache_options.cache_save_interval));
 	
 	Ok(chunk_cache)
 }
