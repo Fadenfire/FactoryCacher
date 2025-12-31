@@ -18,11 +18,13 @@ use tokio::net::UdpSocket;
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
+use common::protocol_utils::MessageTransport;
 
 const WORLD_ESTIMATE_MULTIPLIER: f64 = 1.6;
 
 pub async fn run_server_proxy(
 	connection: quinn::Connection,
+	message_transport: MessageTransport,
 	factorio_address_cell: Arc<Mutex<SocketAddr>>,
 ) -> anyhow::Result<()> {
 	let mut outgoing_queues: HashMap<VarInt, mpsc::Sender<Bytes>> = HashMap::new();
@@ -63,6 +65,7 @@ pub async fn run_server_proxy(
                     receive_queue_rx,
 
                     comp_stream: (send_stream, recv_stream),
+					message_transport: message_transport.clone(),
                 }));
 
                 outgoing_queues.insert(peer_id, receive_queue_tx);
@@ -81,13 +84,14 @@ struct ProxyServerArgs {
 	receive_queue_rx: mpsc::Receiver<Bytes>,
 	
 	comp_stream: (quinn::SendStream, quinn::RecvStream),
+	message_transport: MessageTransport,
 }
 
 async fn proxy_server(mut args: ProxyServerArgs) {
 	let mut buf = BytesMut::new();
 	let mut out_packets = Vec::new();
 	
-	let mut proxy_state = ServerProxyState::new(args.comp_stream);
+	let mut proxy_state = ServerProxyState::new(args.comp_stream, args.message_transport);
 	
 	loop {
 		buf.clear();
@@ -135,6 +139,7 @@ struct ServerProxyState {
 	phase: ServerProxyPhase,
 	packet_filter: Option<FilteringPacketsState>,
 	comp_stream: Option<(quinn::SendStream, quinn::RecvStream)>,
+	message_transport: MessageTransport,
 }
 
 enum ServerProxyPhase {
@@ -164,11 +169,12 @@ struct FilteringPacketsState {
 impl ServerProxyState {
 	const INFLIGHT_BLOCK_REQUEST_LIMIT: usize = 16;
 	
-	pub fn new(comp_stream: (quinn::SendStream, quinn::RecvStream)) -> Self {
+	pub fn new(comp_stream: (quinn::SendStream, quinn::RecvStream), message_transport: MessageTransport) -> Self {
 		Self {
 			phase: ServerProxyPhase::WaitingForWorld,
 			packet_filter: None,
 			comp_stream: Some(comp_stream),
+			message_transport,
 		}
 	}
 	
@@ -334,9 +340,15 @@ impl ServerProxyState {
 		info!("Downloading world took {}ms", state.download_start_time.elapsed().as_millis());
 		
 		let comp_stream = self.comp_stream.take().unwrap();
+		let message_transport = self.message_transport.clone();
 		
 		tokio::spawn(async move {
-			if let Err(err) = transfer_world_data(comp_stream.0, comp_stream.1, state).await {
+			if let Err(err) = transfer_world_data(
+				comp_stream.0,
+				comp_stream.1,
+				message_transport,
+				state
+			).await {
 				error!("Error trying to transfer world data: {:?}", err);
 			}
 		});
@@ -363,6 +375,7 @@ impl ServerProxyState {
 async fn transfer_world_data(
 	mut send_stream: quinn::SendStream,
 	mut recv_stream: quinn::RecvStream,
+	message_transport: MessageTransport,
 	mut downloading_state: DownloadingWorldState,
 ) -> anyhow::Result<()> {
 	let start_time = Instant::now();
@@ -398,7 +411,7 @@ async fn transfer_world_data(
 	let mut total_transferred = 0;
 	let start_time = Instant::now();
 	
-	let world_ready_message = protocol_utils::encode_message_async(WorldReadyMessage {
+	let world_ready_message = message_transport.encode_message_async(WorldReadyMessage {
 		world: world_description,
 		old_info: downloading_state.world_info.clone(),
 		new_info: downloading_state.new_world_info.clone(),
@@ -412,6 +425,7 @@ async fn transfer_world_data(
 	total_transferred += protocol_utils::provide_chunks_as_requested(
 		&mut send_stream,
 		&mut recv_stream,
+		&message_transport,
 		&chunks
 	).await?;
 	

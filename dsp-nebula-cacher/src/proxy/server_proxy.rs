@@ -19,10 +19,15 @@ use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio::try_join;
+use common::protocol_utils::MessageTransport;
 
 type PendingDedupStreamsMap = HashMap<u64, oneshot::Sender<(quinn::SendStream, quinn::RecvStream)>>;
 
-pub async fn run_server_proxy(connection: quinn::Connection, dsp_addr: SocketAddr) -> anyhow::Result<()> {
+pub async fn run_server_proxy(
+	connection: quinn::Connection,
+	message_transport: MessageTransport,
+	dsp_addr: SocketAddr
+) -> anyhow::Result<()> {
 	let pending_dedup_streams: Arc<Mutex<PendingDedupStreamsMap>> = Arc::new(Mutex::new(HashMap::new()));
 	
 	loop {
@@ -33,9 +38,16 @@ pub async fn run_server_proxy(connection: quinn::Connection, dsp_addr: SocketAdd
 			info!("New peer");
 			
 			let pending_dedup_streams = pending_dedup_streams.clone();
+			let message_transport = message_transport.clone();
 			
 			tokio::spawn(async move {
-				if let Err(err) = proxy_server(send_stream, recv_stream, dsp_addr, pending_dedup_streams).await {
+				if let Err(err) = proxy_server(
+					send_stream,
+					recv_stream,
+					dsp_addr,
+					message_transport,
+					pending_dedup_streams
+				).await {
 					error!("Error running proxy connection: {:?}", err);
 				}
 			});
@@ -55,12 +67,13 @@ async fn proxy_server(
 	send_stream: quinn::SendStream,
 	mut recv_stream: quinn::RecvStream,
 	dsp_addr: SocketAddr,
+	message_transport: MessageTransport,
 	pending_dedup_streams: Arc<Mutex<PendingDedupStreamsMap>>,
 ) -> anyhow::Result<()> {
 	let mut buf = BytesMut::new();
 	
 	let message_data = protocol_utils::read_message(&mut recv_stream, &mut buf).await?;
-	let initial_info: InitialConnectionInfo = protocol_utils::decode_message_async(message_data).await?;
+	let initial_info: InitialConnectionInfo = message_transport.decode_message_async(message_data).await?;
 	
 	let socket = TcpStream::connect(dsp_addr).await?;
 	socket.set_nodelay(true)?;
@@ -94,7 +107,7 @@ async fn proxy_server(
 	client_ws_read.set_auto_pong(false);
 	
 	try_join!(
-		copy_with_dedup(server_ws_read, client_ws_write, pending_dedup_streams),
+		copy_with_dedup(server_ws_read, client_ws_write, message_transport, pending_dedup_streams),
 		copy_ws_to_ws(client_ws_read, server_ws_write)
 	)?;
 	
@@ -108,6 +121,7 @@ const MINIMUM_DEDUP_SIZE: usize = 128 * 1024;
 async fn copy_with_dedup<R, W>(
 	mut ws_read: WebSocketRead<R>,
 	mut ws_write: WebSocketWrite<W>,
+	message_transport: MessageTransport,
 	pending_dedup_streams: Arc<Mutex<PendingDedupStreamsMap>>,
 ) -> anyhow::Result<()>
 where
@@ -128,6 +142,7 @@ where
 						dedup_packet(
 							&mut ws_read,
 							&mut ws_write,
+							message_transport.clone(),
 							&pending_dedup_streams,
 							packet_header,
 							frame_data,
@@ -154,6 +169,7 @@ static NEXT_DEDUP_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 async fn dedup_packet<R, W>(
 	ws_read: &mut WebSocketRead<R>,
 	ws_write: &mut WebSocketWrite<W>,
+	message_transport: MessageTransport,
 	pending_dedup_streams: &Mutex<PendingDedupStreamsMap>,
 	packet_header: NebulaPacketHeader,
 	initial_data: Vec<u8>,
@@ -224,7 +240,7 @@ where
 	let mut total_transferred = 0;
 	let start_time = Instant::now();
 	
-	let message_data = protocol_utils::encode_message_async(DedupedPacketDescription {
+	let message_data = message_transport.encode_message_async(DedupedPacketDescription {
 		packet: deconstructed_packet,
 		original_packet_size,
 	}).await?;
@@ -239,7 +255,8 @@ where
 	total_transferred += protocol_utils::provide_chunks_as_requested(
 		&mut send_stream,
 		&mut recv_stream,
-		&all_chunks
+		&message_transport,
+		&all_chunks,
 	).await?;
 	
 	let elapsed = start_time.elapsed();

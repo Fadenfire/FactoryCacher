@@ -5,7 +5,7 @@ use crate::proxy::{PacketDirection, UDP_QUEUE_SIZE};
 use anyhow::anyhow;
 use bytes::{Bytes, BytesMut};
 use common::chunk_cache::ChunkCache;
-use common::protocol_utils::ChunkFetcherProvider;
+use common::protocol_utils::{ChunkFetcherProvider, MessageTransport};
 use common::{dedup, protocol_utils, utils};
 use log::{debug, error, info};
 use quinn_proto::VarInt;
@@ -26,6 +26,7 @@ const WORLD_DATA_TIMEOUT: Duration = Duration::from_secs(60);
 pub async fn run_client_proxy(
 	socket: Arc<UdpSocket>,
 	connection: Arc<quinn::Connection>,
+	message_transport: MessageTransport,
 	chunk_cache: Arc<ChunkCache>,
 ) -> anyhow::Result<()> {
 	let mut addr_to_queue: HashMap<SocketAddr, mpsc::Sender<Bytes>> = HashMap::new();
@@ -62,6 +63,7 @@ pub async fn run_client_proxy(
 							
 							server_receive_queue: server_receive_queue_rx,
 							client_receive_queue: client_receive_queue_rx,
+							message_transport: message_transport.clone(),
 							chunk_cache: chunk_cache.clone(),
 						}));
 						
@@ -94,6 +96,7 @@ struct ProxyClientArgs {
 	
 	server_receive_queue: mpsc::Receiver<Bytes>,
 	client_receive_queue: mpsc::Receiver<Bytes>,
+	message_transport: MessageTransport,
 	chunk_cache: Arc<ChunkCache>,
 }
 
@@ -105,7 +108,13 @@ async fn proxy_client(mut args: ProxyClientArgs) {
 		let (world_data_sender, world_data_receiver) = mpsc::channel(32);
 		
 		tokio::spawn(async {
-			if let Err(err) = transfer_world_data(comp_send, comp_recv, world_data_sender, args.chunk_cache).await {
+			if let Err(err) = transfer_world_data(
+				comp_send,
+				comp_recv,
+				args.message_transport,
+				world_data_sender,
+				args.chunk_cache
+			).await {
 				error!("Error trying to transfer world data: {:?}", err);
 			}
 		});
@@ -203,7 +212,11 @@ impl ClientProxyState {
 			}
 		}
 		
-		if !self.world_data.is_empty() && self.world_data_done && self.last_block_request.elapsed() > WORLD_DATA_TIMEOUT {
+		if
+			!self.world_data.is_empty() &&
+			self.world_data_done &&
+			self.last_block_request.elapsed() > WORLD_DATA_TIMEOUT
+		{
 			info!("Cleaning up local copy of world data");
 			
 			self.world_data = Vec::new();
@@ -253,6 +266,7 @@ impl ClientProxyState {
 async fn transfer_world_data(
 	mut send_stream: quinn::SendStream,
 	mut recv_stream: quinn::RecvStream,
+	message_transport: MessageTransport,
 	world_data_sender: mpsc::Sender<Bytes>,
 	chunk_cache: Arc<ChunkCache>,
 ) -> anyhow::Result<()> {
@@ -278,7 +292,7 @@ async fn transfer_world_data(
 	
 	info!("Received world description, size: {}B", utils::abbreviate_number(world_ready_message_data.len() as u64));
 	
-	let world_ready: WorldReadyMessage = protocol_utils::decode_message_async(world_ready_message_data).await?;
+	let world_ready: WorldReadyMessage = message_transport.decode_message_async(world_ready_message_data).await?;
 	let world_desc = world_ready.world;
 	
 	info!("World description: size: {}, crc: {}, file count: {}, total chunks: {}",
@@ -286,7 +300,12 @@ async fn transfer_world_data(
 	
 	// Reconstruct world, fetching world data chunks along the way
 	
-	let mut chunk_fetcher = ChunkFetcherProvider::new(&chunk_cache, &mut send_stream, &mut recv_stream);
+	let mut chunk_fetcher = ChunkFetcherProvider::new(
+		&chunk_cache,
+		&mut send_stream,
+		&mut recv_stream,
+		message_transport.clone()
+	);
 	
 	dedup::prefetch_metadata_chunks(
 		world_desc.files.iter()

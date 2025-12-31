@@ -1,10 +1,11 @@
 use crate::chunk_cache::ChunkCache;
-use crate::cli_args::CacheOptions;
+use crate::cli_args::{CacheOptions, TransportOptions};
 use log::{error, info};
 use quinn::Endpoint;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
+use crate::protocol_utils::MessageTransport;
 
 pub mod dedup;
 pub mod utils;
@@ -96,6 +97,10 @@ pub async fn create_chunk_cache(cache_options: CacheOptions) -> anyhow::Result<A
 	);
 	
 	Ok(chunk_cache)
+}
+
+pub fn create_message_transport(transport_options: TransportOptions) -> MessageTransport {
+	MessageTransport::new(transport_options.compression_level)
 }
 
 pub fn setup_logging() {

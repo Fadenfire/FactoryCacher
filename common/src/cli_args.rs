@@ -8,6 +8,11 @@ pub struct CacheOptions {
 	pub compression_level: i32,
 }
 
+#[derive(Debug)]
+pub struct TransportOptions {
+	pub compression_level: i32,
+}
+
 #[macro_export]
 macro_rules! client_args {
     ($($fields:tt)*) => {
@@ -16,6 +21,8 @@ macro_rules! client_args {
 		#[argh(subcommand, name = "client")]
 		struct ClientArgs {
 			$($fields)*
+			
+			// Cache options
 			
 			#[argh(option, short = 'c')]
 			/// location of cache file, defaults to 'persistent-cache' in the CWD
@@ -31,7 +38,13 @@ macro_rules! client_args {
 			
 			#[argh(option, default = "3")]
 			/// zstd compression level used for the on-disk chunk cache, must be between 1-22, defaults to 3
-			cache_compression: u32,
+			cache_compression: i32,
+			
+			// Transport options
+			
+			#[argh(option, default = "common::protocol_utils::DEFAULT_ZSTD_COMPRESSION_LEVEL")]
+			/// zstd compression level used messages send over the network, must be between 1-22, defaults to 11
+			net_compression: i32,
 		}
 		
 		impl ClientArgs {
@@ -40,7 +53,13 @@ macro_rules! client_args {
 					cache_path: self.cache_path.clone(),
 					size_limit: self.cache_limit,
 					save_interval: self.cache_interval,
-					compression_level: self.cache_compression as i32,
+					compression_level: self.cache_compression,
+				}
+			}
+			
+			pub fn transport_options(&self) -> common::cli_args::TransportOptions {
+				common::cli_args::TransportOptions {
+					compression_level: self.net_compression,
 				}
 			}
 		}
@@ -57,10 +76,20 @@ macro_rules! server_args {
 		#[argh(subcommand, name = "server")]
 		struct ServerArgs {
 			$($fields)*
+			
+			// Transport options
+			
+			#[argh(option, default = "common::protocol_utils::DEFAULT_ZSTD_COMPRESSION_LEVEL")]
+			/// zstd compression level used messages send over the network, must be between 1-22, defaults to 11
+			net_compression: i32,
 		}
 		
 		impl ServerArgs {
-		
+			pub fn transport_options(&self) -> common::cli_args::TransportOptions {
+				common::cli_args::TransportOptions {
+					compression_level: self.net_compression,
+				}
+			}
 		}
 	};
 }

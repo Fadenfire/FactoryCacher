@@ -9,31 +9,49 @@ use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::dedup::ChunkProvider;
 
-const ZSTD_COMPRESSION_LEVEL: i32 = 7;
+pub const DEFAULT_ZSTD_COMPRESSION_LEVEL: i32 = 11;
+
 const MESSAGE_SIZE_LIMIT: usize = 20_000_000;
 
-pub fn encode_message<T: Serialize>(message: &T) -> anyhow::Result<Bytes> {
-	let mut data: Vec<u8> = Vec::new();
-	
-	let mut encoder = zstd::Encoder::new(&mut data, ZSTD_COMPRESSION_LEVEL)?;
-	rmp_serde::encode::write(&mut encoder, message)?;
-	encoder.finish()?;
-	
-	Ok(data.into())
+#[derive(Clone, Debug)]
+pub struct MessageTransport {
+	compression_level: i32,
 }
 
-pub async fn encode_message_async<T: Serialize + Send + 'static>(message: T) -> anyhow::Result<Bytes> {
-	tokio::task::spawn_blocking(move || encode_message(&message)).await?
-}
-
-pub fn decode_message<T: DeserializeOwned>(msg_data: &[u8]) -> anyhow::Result<T> {
-	let decoder = zstd::Decoder::new(msg_data)?;
+impl MessageTransport {
+	pub fn new(compression_level: i32) -> MessageTransport {
+		MessageTransport {
+			compression_level,
+		}
+	}
 	
-	Ok(rmp_serde::decode::from_read(decoder)?)
-}
-
-pub async fn decode_message_async<T: DeserializeOwned + Send + 'static>(msg_data: Bytes) -> anyhow::Result<T> {
-	tokio::task::spawn_blocking(move || decode_message::<T>(&msg_data)).await?
+	pub fn encode_message<T: Serialize>(&self, message: &T) -> anyhow::Result<Bytes> {
+		let mut data: Vec<u8> = Vec::new();
+		
+		let mut encoder = zstd::Encoder::new(&mut data, self.compression_level)?;
+		rmp_serde::encode::write(&mut encoder, message)?;
+		encoder.finish()?;
+		
+		Ok(data.into())
+	}
+	
+	pub async fn encode_message_async<T: Serialize + Send + 'static>(&self, message: T) -> anyhow::Result<Bytes> {
+		let cloned_self = self.clone();
+		
+		tokio::task::spawn_blocking(move || cloned_self.encode_message(&message)).await?
+	}
+	
+	pub fn decode_message<T: DeserializeOwned>(&self, msg_data: &[u8]) -> anyhow::Result<T> {
+		let decoder = zstd::Decoder::new(msg_data)?;
+		
+		Ok(rmp_serde::decode::from_read(decoder)?)
+	}
+	
+	pub async fn decode_message_async<T: DeserializeOwned + Send + 'static>(&self, msg_data: Bytes) -> anyhow::Result<T> {
+		let cloned_self = self.clone();
+		
+		tokio::task::spawn_blocking(move || cloned_self.decode_message::<T>(&msg_data)).await?
+	}
 }
 
 pub async fn write_message<W: AsyncWrite + Unpin>(io: &mut W, msg_data: Bytes) -> anyhow::Result<()> {
@@ -73,6 +91,7 @@ pub struct SendChunksMessage {
 pub async fn provide_chunks_as_requested(
 	send_stream: &mut quinn::SendStream,
 	recv_stream: &mut quinn::RecvStream,
+	message_transport: &MessageTransport,
 	chunks: &HashMap<ChunkKey, Bytes>,
 ) -> anyhow::Result<usize> {
 	let mut buf = BytesMut::new();
@@ -81,7 +100,7 @@ pub async fn provide_chunks_as_requested(
 	while let Ok(request_data) = read_message(recv_stream, &mut buf).await {
 		total_transferred += request_data.len();
 		
-		let request: RequestChunksMessage = decode_message_async(request_data).await?;
+		let request: RequestChunksMessage = message_transport.decode_message_async(request_data).await?;
 		
 		let response = SendChunksMessage {
 			chunks: request.requested_chunks.iter()
@@ -93,7 +112,7 @@ pub async fn provide_chunks_as_requested(
 				.collect::<anyhow::Result<_>>()?,
 		};
 		
-		let response_data = encode_message_async(response).await?;
+		let response_data = message_transport.encode_message_async(response).await?;
 		
 		total_transferred += response_data.len();
 		
@@ -112,6 +131,7 @@ pub struct ChunkFetcherProvider<'a> {
 	chunk_cache: &'a ChunkCache,
 	send_stream: &'a mut quinn::SendStream,
 	recv_stream: &'a mut quinn::RecvStream,
+	message_transport: MessageTransport,
 	
 	local_cache: HashMap<ChunkKey, Bytes>,
 	pending_chunks: Vec<ChunkKey>,
@@ -125,11 +145,13 @@ impl<'a> ChunkFetcherProvider<'a> {
 		chunk_cache: &'a ChunkCache,
 		send_stream: &'a mut quinn::SendStream,
 		recv_stream: &'a mut quinn::RecvStream,
+		message_transport: MessageTransport,
 	) -> Self {
 		Self {
 			chunk_cache,
 			send_stream,
 			recv_stream,
+			message_transport,
 			
 			local_cache: HashMap::new(),
 			pending_chunks: Vec::new(),
@@ -172,7 +194,7 @@ impl<'a> ChunkFetcherProvider<'a> {
 		let Some(batch) = self.chunk_cache.get_chunks_batched(&mut self.pending_chunks, &mut self.local_cache, 512).await
 			else { return Ok(()); };
 		
-		let request_data = encode_message_async(RequestChunksMessage {
+		let request_data = self.message_transport.encode_message_async(RequestChunksMessage {
 			requested_chunks: batch.batch_keys().to_vec(),
 		}).await?;
 		
@@ -189,7 +211,7 @@ impl<'a> ChunkFetcherProvider<'a> {
 			utils::abbreviate_number(response_data.len() as u64)
 		);
 		
-		let response: SendChunksMessage = decode_message_async(response_data).await?;
+		let response: SendChunksMessage = self.message_transport.decode_message_async(response_data).await?;
 		
 		for (&key, chunk) in batch.batch_keys().iter().zip(response.chunks.iter()) {
 			let data_hash = blake3::hash(&chunk);

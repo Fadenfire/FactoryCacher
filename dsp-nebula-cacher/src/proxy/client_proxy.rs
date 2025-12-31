@@ -2,7 +2,7 @@ use crate::protocol::{DedupedPacketDescription, InitialConnectionInfo, StartDedu
 use crate::proxy::{copy_ws_to_ws, read_ws_frame};
 use bytes::{Bytes, BytesMut};
 use common::chunk_cache::ChunkCache;
-use common::protocol_utils::{ChunkFetcherProvider};
+use common::protocol_utils::{ChunkFetcherProvider, MessageTransport};
 use common::{protocol_utils, utils};
 use fastwebsockets::upgrade::UpgradeFut;
 use fastwebsockets::{Frame, OpCode, Payload, Role, WebSocketRead, WebSocketWrite};
@@ -22,6 +22,7 @@ use tokio::{select, try_join};
 pub async fn run_client_proxy(
 	tcp_listener: TcpListener,
 	connection: Arc<quinn::Connection>,
+	message_transport: MessageTransport,
 	chunk_cache: Arc<ChunkCache>,
 ) -> anyhow::Result<()> {
 	loop {
@@ -30,7 +31,12 @@ pub async fn run_client_proxy(
 				let (tcp_stream, addr) = result?;
 				info!("New peer from {:?}", addr);
 				
-				tokio::spawn(handle_connection(tcp_stream, connection.clone(), chunk_cache.clone()));
+				tokio::spawn(handle_connection(
+					tcp_stream,
+					connection.clone(),
+					message_transport.clone(),
+					chunk_cache.clone()
+				));
 			}
 			_ = connection.closed() => {
 				info!("Connection closed");
@@ -41,11 +47,16 @@ pub async fn run_client_proxy(
 	}
 }
 
-async fn handle_connection(tcp_stream: TcpStream, connection: Arc<quinn::Connection>, chunk_cache: Arc<ChunkCache>) {
+async fn handle_connection(
+	tcp_stream: TcpStream,
+	connection: Arc<quinn::Connection>,
+	message_transport: MessageTransport,
+	chunk_cache: Arc<ChunkCache>
+) {
 	tcp_stream.set_nodelay(true).expect("Error disabling Nagle algorithm");
 	
 	let service = service_fn(|req| {
-		handle_request(req, connection.clone(), chunk_cache.clone())
+		handle_request(req, connection.clone(), message_transport.clone(), chunk_cache.clone())
 	});
 	
 	let result = hyper::server::conn::http1::Builder::new()
@@ -61,6 +72,7 @@ async fn handle_connection(tcp_stream: TcpStream, connection: Arc<quinn::Connect
 async fn handle_request(
 	mut request: Request<Incoming>,
 	connection: Arc<quinn::Connection>,
+	message_transport: MessageTransport,
 	chunk_cache: Arc<ChunkCache>,
 ) -> anyhow::Result<Response<Empty<Bytes>>> {
 	if !fastwebsockets::upgrade::is_upgrade_request(&request) {
@@ -73,7 +85,7 @@ async fn handle_request(
 	
 	let (mut send_stream, recv_stream) = connection.open_bi().await?;
 	
-	let message_data = protocol_utils::encode_message_async(InitialConnectionInfo {
+	let message_data = message_transport.encode_message_async(InitialConnectionInfo {
 		client_uri: request.uri().to_string(),
 	}).await?;
 	
@@ -81,7 +93,14 @@ async fn handle_request(
 	protocol_utils::write_message(&mut send_stream, message_data).await?;
 	
 	tokio::spawn(async move {
-		if let Err(err) = handle_ws_connection(ws_future, connection, send_stream, recv_stream, chunk_cache).await {
+		if let Err(err) = handle_ws_connection(
+			ws_future,
+			connection,
+			message_transport,
+			send_stream,
+			recv_stream,
+			chunk_cache
+		).await {
 			error!("Error handling websocket connection: {:?}", err);
 		}
 	});
@@ -92,6 +111,7 @@ async fn handle_request(
 async fn handle_ws_connection(
 	ws_future: UpgradeFut,
 	connection: Arc<quinn::Connection>,
+	message_transport: MessageTransport,
 	send_stream: quinn::SendStream,
 	recv_stream: quinn::RecvStream,
 	chunk_cache: Arc<ChunkCache>,
@@ -111,7 +131,7 @@ async fn handle_ws_connection(
 	server_ws_read.set_auto_pong(false);
 	
 	try_join!(
-		copy_with_dedup(server_ws_read, client_ws_write, connection, chunk_cache),
+		copy_with_dedup(server_ws_read, client_ws_write, connection, message_transport, chunk_cache),
 		copy_ws_to_ws(client_ws_read, server_ws_write)
 	)?;
 	
@@ -124,6 +144,7 @@ async fn copy_with_dedup<R, W>(
 	mut ws_read: WebSocketRead<R>,
 	mut ws_write: WebSocketWrite<W>,
 	connection: Arc<quinn::Connection>,
+	message_transport: MessageTransport,
 	chunk_cache: Arc<ChunkCache>,
 ) -> anyhow::Result<()>
 where
@@ -137,6 +158,7 @@ where
 					indicator,
 					&mut ws_write,
 					connection.clone(),
+					message_transport.clone(),
 					chunk_cache.clone(),
 				).await?;
 				
@@ -154,6 +176,7 @@ async fn forward_deduped_fragments<W>(
 	dedup_indicator: StartDedupIndicator,
 	ws_write: &mut WebSocketWrite<W>,
 	connection: Arc<quinn::Connection>,
+	message_transport: MessageTransport,
 	chunk_cache: Arc<ChunkCache>,
 ) -> anyhow::Result<()>
 where
@@ -162,7 +185,13 @@ where
 	let (tx, mut rx) = mpsc::channel(16);
 	
 	tokio::spawn(async move {
-		if let Err(err) = reconstruct_packet(dedup_indicator.dedup_id, tx, connection, chunk_cache).await {
+		if let Err(err) = reconstruct_packet(
+			dedup_indicator.dedup_id,
+			tx,
+			connection,
+			message_transport,
+			chunk_cache
+		).await {
 			error!("Error reconstructing packet: {:?}", err);
 		}
 	});
@@ -195,6 +224,7 @@ async fn reconstruct_packet(
 	dedup_stream_id: u64,
 	outgoing_fragments: mpsc::Sender<Bytes>,
 	connection: Arc<quinn::Connection>,
+	message_transport: MessageTransport,
 	chunk_cache: Arc<ChunkCache>,
 ) -> anyhow::Result<()> {
 	let mut buf = BytesMut::new();
@@ -216,11 +246,16 @@ async fn reconstruct_packet(
 	total_transferred += packet_desc_message_data.len();
 	info!("Received packet description, size: {}B", utils::abbreviate_number(packet_desc_message_data.len() as u64));
 	
-	let packet_desc: DedupedPacketDescription = protocol_utils::decode_message_async(packet_desc_message_data).await?;
+	let packet_desc: DedupedPacketDescription = message_transport.decode_message_async(packet_desc_message_data).await?;
 	
 	// Reconstruct
 	
-	let mut chunk_fetcher = ChunkFetcherProvider::new(&chunk_cache, &mut send_stream, &mut recv_stream);
+	let mut chunk_fetcher = ChunkFetcherProvider::new(
+		&chunk_cache,
+		&mut send_stream,
+		&mut recv_stream,
+		message_transport.clone()
+	);
 	
 	packet_desc.packet.reconstruct(&mut chunk_fetcher, &outgoing_fragments).await?;
 	

@@ -99,12 +99,13 @@ async fn run_client(endpoint: &Endpoint, server_address: SocketAddr, args: &Clie
 	info!("Connected");
 	
 	let chunk_cache = common::create_chunk_cache(args.cache_options()).await?;
+	let message_transport = common::create_message_transport(args.transport_options());
 	
 	info!("Listening on {}", listen_address);
 	
 	let _upnp_port_mapping = if args.upnp { Some(upnp::open_port(args.port)?) } else { None };
 	
-	client_proxy::run_client_proxy(socket.clone(), quic_connection.clone(), chunk_cache.clone()).await?;
+	client_proxy::run_client_proxy(socket, quic_connection, message_transport, chunk_cache).await?;
 	
 	Ok(())
 }
@@ -116,6 +117,7 @@ async fn subcommand_server(args: ServerArgs) {
 		.expect("No server address found");
 	
 	let endpoint = quic::create_server_endpoint(SocketAddr::new(args.host, args.port));
+	let message_transport = common::create_message_transport(args.transport_options());
 	
 	let _upnp_port_mapping = if args.upnp { Some(upnp::open_port(args.port).unwrap()) } else { None };
 	
@@ -126,6 +128,10 @@ async fn subcommand_server(args: ServerArgs) {
 	}
 	
 	common::cli_wrapper(&endpoint, || {
-		common::run_server(&endpoint, move |conn| server_proxy::run_server_proxy(conn, factorio_address_cell.clone()))
+		common::run_server(&endpoint, move |conn| server_proxy::run_server_proxy(
+			conn,
+			message_transport.clone(),
+			factorio_address_cell.clone()
+		))
 	}).await.unwrap();
 }
