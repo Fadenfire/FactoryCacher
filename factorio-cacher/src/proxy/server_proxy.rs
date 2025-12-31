@@ -20,11 +20,15 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use common::protocol_utils::MessageTransport;
 
-const WORLD_ESTIMATE_MULTIPLIER: f64 = 1.6;
+#[derive(Clone, Debug)]
+pub struct WorldOptions {
+	pub world_estimate_multiplier: f64,
+}
 
 pub async fn run_server_proxy(
 	connection: quinn::Connection,
 	message_transport: MessageTransport,
+	world_options: WorldOptions,
 	factorio_address_cell: Arc<Mutex<SocketAddr>>,
 ) -> anyhow::Result<()> {
 	let mut outgoing_queues: HashMap<VarInt, mpsc::Sender<Bytes>> = HashMap::new();
@@ -66,6 +70,7 @@ pub async fn run_server_proxy(
 
                     comp_stream: (send_stream, recv_stream),
 					message_transport: message_transport.clone(),
+					world_options: world_options.clone(),
                 }));
 
                 outgoing_queues.insert(peer_id, receive_queue_tx);
@@ -85,13 +90,18 @@ struct ProxyServerArgs {
 	
 	comp_stream: (quinn::SendStream, quinn::RecvStream),
 	message_transport: MessageTransport,
+	world_options: WorldOptions,
 }
 
 async fn proxy_server(mut args: ProxyServerArgs) {
 	let mut buf = BytesMut::new();
 	let mut out_packets = Vec::new();
 	
-	let mut proxy_state = ServerProxyState::new(args.comp_stream, args.message_transport);
+	let mut proxy_state = ServerProxyState::new(
+		args.comp_stream,
+		args.message_transport,
+		args.world_options
+	);
 	
 	loop {
 		buf.clear();
@@ -140,6 +150,7 @@ struct ServerProxyState {
 	packet_filter: Option<FilteringPacketsState>,
 	comp_stream: Option<(quinn::SendStream, quinn::RecvStream)>,
 	message_transport: MessageTransport,
+	world_options: WorldOptions,
 }
 
 enum ServerProxyPhase {
@@ -169,12 +180,17 @@ struct FilteringPacketsState {
 impl ServerProxyState {
 	const INFLIGHT_BLOCK_REQUEST_LIMIT: usize = 16;
 	
-	pub fn new(comp_stream: (quinn::SendStream, quinn::RecvStream), message_transport: MessageTransport) -> Self {
+	pub fn new(
+		comp_stream: (quinn::SendStream, quinn::RecvStream),
+		message_transport: MessageTransport,
+		world_options: WorldOptions,
+	) -> Self {
 		Self {
 			phase: ServerProxyPhase::WaitingForWorld,
 			packet_filter: None,
 			comp_stream: Some(comp_stream),
 			message_transport,
+			world_options,
 		}
 	}
 	
@@ -271,7 +287,8 @@ impl ServerProxyState {
 	) {
 		info!("Got world info: {:?}", world_info);
 		
-		let estimated_reconstructed_world_size = (world_info.world_size as f64 * WORLD_ESTIMATE_MULTIPLIER) as u32;
+		let estimated_reconstructed_world_size =
+			(world_info.world_size as f64 * self.world_options.world_estimate_multiplier) as u32;
 		
 		info!("Estimated reconstructed world size: {}", estimated_reconstructed_world_size);
 		

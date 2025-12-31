@@ -7,6 +7,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::net::{lookup_host, UdpSocket};
+use crate::proxy::server_proxy::WorldOptions;
 
 mod factorio_protocol;
 mod proxy;
@@ -68,6 +69,10 @@ cli_args::server_args! {
 	#[argh(switch)]
 	/// enable auto LAN port discovery
 	auto_lan: bool,
+	
+	#[argh(option, default = "1.6")]
+	/// the multiplier applied to the original world size to estimate the reconstructed world size, defaults to 1.6
+	world_est_multiplier: f64,
 }
 
 #[tokio::main()]
@@ -119,6 +124,10 @@ async fn subcommand_server(args: ServerArgs) {
 	let endpoint = quic::create_server_endpoint(SocketAddr::new(args.host, args.port));
 	let message_transport = common::create_message_transport(args.transport_options());
 	
+	let world_options = WorldOptions {
+		world_estimate_multiplier: args.world_est_multiplier,
+	};
+	
 	let _upnp_port_mapping = if args.upnp { Some(upnp::open_port(args.port).unwrap()) } else { None };
 	
 	let factorio_address_cell = Arc::new(Mutex::new(factorio_address));
@@ -131,7 +140,8 @@ async fn subcommand_server(args: ServerArgs) {
 		common::run_server(&endpoint, move |conn| server_proxy::run_server_proxy(
 			conn,
 			message_transport.clone(),
-			factorio_address_cell.clone()
+			world_options.clone(),
+			factorio_address_cell.clone(),
 		))
 	}).await.unwrap();
 }
